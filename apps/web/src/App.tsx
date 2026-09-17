@@ -239,17 +239,16 @@ export function App({
   );
   const areaLabels = useMemo(() => (repo?.labels ?? []).map((l) => l.name).sort(), [repo?.labels]);
   const visible = view === "unsure" ? unsureRows : filtered;
-  const visibleIds = useMemo(
-    () =>
-      pullGroups
+  // What j/k walk through, in display order. Decided by the view first: the pull grouping
+  // is a persisted preference and must not leak pull ids into the issue views.
+  const visibleIds = useMemo(() => {
+    if (pullView)
+      return pullGroups
         ? pullGroups.flatMap((g) => g.rows.map((r) => r.pull.id))
-        : pullView
-          ? filteredPulls.map((r) => r.pull.id)
-          : triageGroups
-            ? triageGroups.flatMap((g) => g.rows.map((r) => r.issue.id))
-            : visible.map((r) => r.issue.id),
-    [pullGroups, pullView, filteredPulls, triageGroups, visible],
-  );
+        : filteredPulls.map((r) => r.pull.id);
+    if (triageGroups) return triageGroups.flatMap((g) => g.rows.map((r) => r.issue.id));
+    return visible.map((r) => r.issue.id);
+  }, [pullGroups, pullView, filteredPulls, triageGroups, visible]);
   const loading = !!repoId && issuesResult?.type !== "complete" && (issues ?? []).length === 0;
   const pullsLoading = !!repoId && pullsResult?.type !== "complete" && (pulls ?? []).length === 0;
   const busy = repo?.sync_status === "running" || !!repo?.workerState?.in_flight;
