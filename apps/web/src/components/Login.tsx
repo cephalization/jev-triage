@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { devLogin, type Session } from "../lib/auth.ts";
 import { Button } from "./ui/button.tsx";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
 import { Input } from "./ui/input.tsx";
 
 export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
@@ -24,31 +23,43 @@ export function Login({ onLogin }: { onLogin: (s: Session) => void }) {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-4">
-      <Card className="w-full max-w-sm">
-        <CardHeader>
-          <CardTitle>typeful-triage</CardTitle>
-          <CardDescription>
-            Dev sign-in: pick a name. The same name is the same user in every tab, so open two
-            windows to see the multiplayer bits.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={submit} className="flex flex-col gap-3">
-            <Input
-              autoFocus
-              placeholder="Your name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              maxLength={40}
-            />
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" disabled={busy || !name.trim()}>
-              {busy ? "Signing in…" : "Sign in"}
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
+    <div className="flex min-h-dvh items-center justify-center bg-background p-4 text-sm antialiased">
+      <div className="flex w-full max-w-xs flex-col items-center gap-6">
+        <div className="flex flex-col items-center gap-3">
+          <span className="flex size-10 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+            <svg width={20} height={20} viewBox="0 0 16 16" aria-hidden="true">
+              <path
+                d="M3.5 8.5l3 3L12.5 5"
+                stroke="currentColor"
+                strokeWidth={2}
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </span>
+          <h1 className="text-lg font-semibold tracking-tight text-balance">
+            Sign in to typeful-triage
+          </h1>
+          <p className="text-center text-muted-foreground text-pretty">
+            Dev sign-in. The same name is the same user in every tab, so open two windows to see the
+            multiplayer bits.
+          </p>
+        </div>
+        <form onSubmit={submit} className="flex w-full flex-col gap-2">
+          <Input
+            autoFocus
+            placeholder="Your name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            maxLength={40}
+          />
+          {error && <p className="text-destructive">{error}</p>}
+          <Button type="submit" disabled={busy || !name.trim()}>
+            {busy ? "Signing in…" : "Continue"}
+          </Button>
+        </form>
+      </div>
     </div>
   );
 }

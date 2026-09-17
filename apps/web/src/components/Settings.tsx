@@ -3,9 +3,9 @@ import { mutators, queries } from "@triage/schema";
 import { THRESHOLDS } from "@triage/triage/policy";
 import type { PriorityWeights } from "@triage/triage/priority";
 import { useEffect, useState } from "react";
+import { pokeWorker } from "../lib/api.ts";
 import { ago, compact } from "../lib/format.ts";
 import { Button } from "./ui/button.tsx";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
 import { Slider } from "./ui/slider.tsx";
@@ -18,6 +18,26 @@ const WEIGHT_KEYS: (keyof PriorityWeights)[] = [
   "comments",
   "age",
 ];
+
+function Section({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="grid gap-4 py-6 first:pt-0 last:pb-0 md:grid-cols-[14rem_1fr] md:gap-8">
+      <div>
+        <h2 className="font-medium">{title}</h2>
+        <p className="mt-1 text-xs text-muted-foreground text-pretty">{description}</p>
+      </div>
+      <div className="flex max-w-md flex-col gap-4">{children}</div>
+    </section>
+  );
+}
 
 export function Settings({
   repoId,
@@ -48,95 +68,105 @@ export function Settings({
 
   const ws = repo?.workerState;
   return (
-    <div className="grid gap-4 p-4 lg:grid-cols-3">
-      <Card>
-        <CardHeader>
-          <CardTitle>Priority weights</CardTitle>
-          <CardDescription>
-            Only the view changes; nothing is re-asked. Stored per browser.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {WEIGHT_KEYS.map((k) => (
-            <div key={k} className="flex flex-col gap-1">
-              <div className="flex justify-between text-sm">
-                <Label>{k}</Label>
-                <span className="tabular-nums text-muted-foreground">{weights[k].toFixed(2)}</span>
-              </div>
-              <Slider
-                min={0}
-                max={1}
-                step={0.05}
-                value={[weights[k]]}
-                onValueChange={([v]) => setWeights({ ...weights, [k]: v ?? 0 })}
-              />
+    <div className="mx-auto flex max-w-3xl flex-col divide-y p-6">
+      <Section
+        title="Priority weights"
+        description="Only the view changes; nothing is re-asked. Stored in this browser."
+      >
+        {WEIGHT_KEYS.map((k) => (
+          <div key={k} className="flex flex-col gap-1.5">
+            <div className="flex justify-between">
+              <Label className="capitalize">{k}</Label>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {weights[k].toFixed(2)}
+              </span>
             </div>
-          ))}
-          <div className="text-xs text-muted-foreground">
-            Policy thresholds (in code): category auto-apply ≥ {THRESHOLDS.categoryAuto}, area ≥{" "}
-            {THRESHOLDS.areaAuto}, duplicate ≥ {THRESHOLDS.duplicateMin}. Duplicates are never
-            auto-closed.
+            <Slider
+              min={0}
+              max={1}
+              step={0.05}
+              value={[weights[k]]}
+              onValueChange={([v]) => setWeights({ ...weights, [k]: v ?? 0 })}
+            />
           </div>
-        </CardContent>
-      </Card>
+        ))}
+        <p className="text-xs text-muted-foreground text-pretty">
+          Policy thresholds live in code: category auto-apply at {THRESHOLDS.categoryAuto}, area at{" "}
+          {THRESHOLDS.areaAuto}, duplicate at {THRESHOLDS.duplicateMin}. Duplicates are never
+          auto-closed.
+        </p>
+      </Section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Cost controls</CardTitle>
-          <CardDescription>
-            Shared with everyone on this repo. One TypeSafe request per batch, one in flight.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          {!repo && <p className="text-sm text-muted-foreground">Pick a repo.</p>}
-          {repo && (
-            <>
-              <label className="flex items-center justify-between text-sm">
-                <span>Classification paused</span>
-                <Switch
-                  checked={repo.paused}
-                  onCheckedChange={(v) =>
-                    void z.mutate(mutators.repo.setKnobs({ repoId: repo.id, paused: v }))
-                  }
+      <Section
+        title="Cost controls"
+        description="Shared with everyone on this repo. One TypeSafe request per batch, one in flight."
+      >
+        {!repo && <p className="text-muted-foreground">Pick a repository first.</p>}
+        {repo && (
+          <>
+            <label className="flex items-center justify-between gap-4">
+              <span>
+                Pause classification
+                <span className="block text-xs text-muted-foreground">
+                  Triggers still queue; nothing is sent.
+                </span>
+              </span>
+              <Switch
+                checked={repo.paused}
+                onCheckedChange={(v) =>
+                  void z.mutate(mutators.repo.setKnobs({ repoId: repo.id, paused: v }))
+                }
+              />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="batch">Batch size</Label>
+                <Input
+                  id="batch"
+                  className="h-8"
+                  value={batch}
+                  onChange={(e) => setBatch(e.target.value)}
+                  inputMode="numeric"
                 />
-              </label>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="flex flex-col gap-1">
-                  <Label>Batch size</Label>
-                  <Input
-                    value={batch}
-                    onChange={(e) => setBatch(e.target.value)}
-                    inputMode="numeric"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label>Cadence (ms)</Label>
-                  <Input
-                    value={cadence}
-                    onChange={(e) => setCadence(e.target.value)}
-                    inputMode="numeric"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label>Sync cap (issues)</Label>
-                  <Input
-                    value={limit}
-                    onChange={(e) => setLimit(e.target.value)}
-                    inputMode="numeric"
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label>Budget (tokens, 0 = ∞)</Label>
-                  <Input
-                    value={budget}
-                    onChange={(e) => setBudget(e.target.value)}
-                    inputMode="numeric"
-                  />
-                </div>
               </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="cadence">Cadence (ms)</Label>
+                <Input
+                  id="cadence"
+                  className="h-8"
+                  value={cadence}
+                  onChange={(e) => setCadence(e.target.value)}
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="limit">Sync cap (issues)</Label>
+                <Input
+                  id="limit"
+                  className="h-8"
+                  value={limit}
+                  onChange={(e) => setLimit(e.target.value)}
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="budget">Token budget (0 = unlimited)</Label>
+                <Input
+                  id="budget"
+                  className="h-8"
+                  value={budget}
+                  onChange={(e) => setBudget(e.target.value)}
+                  inputMode="numeric"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-xs text-muted-foreground tabular-nums">
+                Used {compact(Number(repo.tokens_used))} tokens
+                {Number(repo.budget_tokens) > 0 ? ` of ${compact(Number(repo.budget_tokens))}` : ""}
+              </span>
               <Button
                 size="sm"
-                variant="outline"
                 onClick={() =>
                   void z.mutate(
                     mutators.repo.setKnobs({
@@ -149,97 +179,88 @@ export function Settings({
                   )
                 }
               >
-                Save knobs
-              </Button>
-              <div className="text-xs text-muted-foreground">
-                used {compact(Number(repo.tokens_used))} tokens
-                {Number(repo.budget_tokens) > 0 ? ` of ${compact(Number(repo.budget_tokens))}` : ""}
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Worker</CardTitle>
-          <CardDescription>Backpressure stats, live from the server.</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3 text-sm">
-          {!ws && <p className="text-muted-foreground">No runs yet.</p>}
-          {ws && (
-            <dl className="grid grid-cols-2 gap-x-3 gap-y-1">
-              <dt className="text-muted-foreground">in flight</dt>
-              <dd>{ws.in_flight ? "yes" : "no"}</dd>
-              <dt className="text-muted-foreground">dirty</dt>
-              <dd>{ws.dirty ? "yes" : "no"}</dd>
-              <dt className="text-muted-foreground">pending issues</dt>
-              <dd>{ws.pending}</dd>
-              <dt className="text-muted-foreground">requests</dt>
-              <dd>{ws.requests}</dd>
-              <dt className="text-muted-foreground">dropped triggers</dt>
-              <dd>{ws.dropped_triggers}</dd>
-              <dt className="text-muted-foreground">coalesced triggers</dt>
-              <dd>{ws.coalesced_triggers}</dd>
-              <dt className="text-muted-foreground">updated</dt>
-              <dd>{ago(ws.updated_at, now)}</dd>
-              {ws.last_error && (
-                <>
-                  <dt className="text-muted-foreground">last error</dt>
-                  <dd className="text-destructive">{ws.last_error}</dd>
-                </>
-              )}
-            </dl>
-          )}
-          {repo && (
-            <div className="flex flex-wrap gap-2">
-              <Button
-                size="sm"
-                onClick={() =>
-                  void fetch("/api/classify/poke", {
-                    method: "POST",
-                    headers: { "content-type": "application/json" },
-                    body: JSON.stringify({ repoId: repo.id }),
-                  })
-                }
-              >
-                Poke worker
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={visibleIssueIds.length === 0}
-                onClick={() =>
-                  void z.mutate(
-                    mutators.repo.recalculate({
-                      repoId: repo.id,
-                      mode: "flag",
-                      issueIds: visibleIssueIds,
-                    }),
-                  )
-                }
-              >
-                Recalculate {visibleIssueIds.length} filtered
-              </Button>
-              <Button
-                size="sm"
-                variant="destructive"
-                onClick={() => {
-                  if (
-                    confirm(
-                      "Bump questions_version? Every issue will be re-classified (new rows, old ones kept).",
-                    )
-                  ) {
-                    void z.mutate(mutators.repo.recalculate({ repoId: repo.id, mode: "version" }));
-                  }
-                }}
-              >
-                Recalculate everything (v{repo.questions_version + 1})
+                Save
               </Button>
             </div>
-          )}
-        </CardContent>
-      </Card>
+          </>
+        )}
+      </Section>
+
+      <Section title="Worker" description="Backpressure stats, live from the server.">
+        {!ws && <p className="text-muted-foreground">No runs yet.</p>}
+        {ws && (
+          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
+            <dt className="text-muted-foreground">In flight</dt>
+            <dd>{ws.in_flight ? "yes" : "no"}</dd>
+            <dt className="text-muted-foreground">Dirty</dt>
+            <dd>{ws.dirty ? "yes" : "no"}</dd>
+            <dt className="text-muted-foreground">Pending issues</dt>
+            <dd className="tabular-nums">{ws.pending}</dd>
+            <dt className="text-muted-foreground">Requests</dt>
+            <dd className="tabular-nums">{ws.requests}</dd>
+            <dt className="text-muted-foreground">Dropped triggers</dt>
+            <dd className="tabular-nums">{ws.dropped_triggers}</dd>
+            <dt className="text-muted-foreground">Coalesced triggers</dt>
+            <dd className="tabular-nums">{ws.coalesced_triggers}</dd>
+            <dt className="text-muted-foreground">Updated</dt>
+            <dd>{ago(ws.updated_at, now)}</dd>
+            {ws.last_error && (
+              <>
+                <dt className="text-muted-foreground">Last error</dt>
+                <dd className="text-destructive">{ws.last_error}</dd>
+              </>
+            )}
+          </dl>
+        )}
+        {repo && (
+          <div className="flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => void pokeWorker(repo.id)}>
+              Poke worker
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={visibleIssueIds.length === 0}
+              onClick={() =>
+                void z.mutate(
+                  mutators.repo.recalculate({
+                    repoId: repo.id,
+                    mode: "flag",
+                    issueIds: visibleIssueIds,
+                  }),
+                )
+              }
+            >
+              Recalculate {visibleIssueIds.length} in view
+            </Button>
+          </div>
+        )}
+      </Section>
+
+      {repo && (
+        <Section
+          title="Recalculate everything"
+          description="Bumps the questions version. Every issue is re-asked; old answers are kept as history."
+        >
+          <div>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => {
+                if (
+                  confirm(
+                    "Bump questions_version? Every issue will be re-classified (new rows, old ones kept).",
+                  )
+                ) {
+                  void z.mutate(mutators.repo.recalculate({ repoId: repo.id, mode: "version" }));
+                }
+              }}
+            >
+              Recalculate everything (v{repo.questions_version + 1})
+            </Button>
+          </div>
+        </Section>
+      )}
     </div>
   );
 }

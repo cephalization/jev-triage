@@ -41,7 +41,7 @@ vp run -r test      # unit tests in every package
   recently touched issues land and get classified first. Recent phase = last year (or down to the
   previous high-water mark `repo.sync_cursor` on a re-sync); history phase = older pages, one every
   4 s, resumable via `repo.history_cursor`. `repo.sync_limit` (default 100, Settings → Sync cap)
-  caps *new* issues; updates to stored issues always apply. Progress is on the repo row
+  caps _new_ issues; updates to stored issues always apply. Progress is on the repo row
   (`sync_phase`, `sync_fetched`, `sync_pages`, `sync_rate_remaining`, `sync_message`).
 - **Classify** (`apps/api/src/worker`): one `Scheduler` per repo. A poke while a request is in
   flight only sets `dirty` (counted as a dropped trigger); pokes inside the 300 ms collect window

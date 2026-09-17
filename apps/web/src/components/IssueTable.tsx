@@ -1,12 +1,10 @@
 import { cn } from "cn";
-import { ArrowDown, ArrowUp, Copy, HelpCircle } from "lucide-react";
+import { ArrowDown, ArrowUp, CircleHelp, Copy, MessageSquare } from "lucide-react";
 import type { SortKey, TriageRow } from "../lib/derive.ts";
-import { ago } from "../lib/format.ts";
+import { agoShort } from "../lib/format.ts";
 import { PRESENCE_TTL_MS } from "../lib/presence.ts";
 import { AvatarStack } from "./Avatar.tsx";
-import { CategoryChip, Meter } from "./Marks.tsx";
-import { Badge } from "./ui/badge.tsx";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table.tsx";
+import { CategoryChip, Pill, PriorityBars, SeverityMark, StatusIcon } from "./Marks.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
 export interface UserInfo {
@@ -14,6 +12,9 @@ export interface UserInfo {
   name: string;
   color: string;
 }
+
+const TH =
+  "sticky top-0 z-10 h-8 bg-background px-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_var(--border)]";
 
 export function IssueTable({
   rows,
@@ -43,17 +44,20 @@ export function IssueTable({
     children,
     className,
   }: {
-    k: SortKey;
-    children: React.ReactNode;
+    k?: SortKey;
+    children?: React.ReactNode;
     className?: string;
   }) => (
-    <TableHead
-      className={cn("cursor-pointer select-none whitespace-nowrap", className)}
-      onClick={() => onSort(k)}
+    <th
+      className={cn(TH, k && "cursor-pointer select-none hover:text-foreground", className)}
+      onClick={k ? () => onSort(k) : undefined}
+      aria-sort={
+        k && sort.key === k ? (sort.dir === "asc" ? "ascending" : "descending") : undefined
+      }
     >
       <span className="inline-flex items-center gap-1">
         {children}
-        {sort.key === k ? (
+        {k && sort.key === k ? (
           sort.dir === "asc" ? (
             <ArrowUp className="size-3" />
           ) : (
@@ -61,133 +65,174 @@ export function IssueTable({
           )
         ) : null}
       </span>
-    </TableHead>
+    </th>
   );
   const dupLabel = (v: string) => {
     if (v.startsWith("#")) return v;
     const n = [...numberToId.entries()].find(([, id]) => id === v)?.[0];
     return n ? `#${n}` : "another issue";
   };
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <Head k="number" className="w-16">
+    <table className="w-full table-fixed border-collapse text-sm">
+      <thead>
+        <tr>
+          <Head k="priority" className="w-8 pl-4">
+            <span className="sr-only">Priority</span>
+          </Head>
+          <Head k="number" className="w-14">
             #
           </Head>
-          <TableHead>Title</TableHead>
-          <Head k="category">Category</Head>
-          <TableHead>Area</TableHead>
-          <Head k="severity">Severity</Head>
-          <Head k="priority">Priority</Head>
-          <TableHead>Flags</TableHead>
-          <TableHead>People</TableHead>
-          <Head k="updated" className="text-right">
+          <Head className="w-6">
+            <span className="sr-only">Status</span>
+          </Head>
+          <Head>Title</Head>
+          <Head k="category" className="w-28">
+            Category
+          </Head>
+          <Head className="w-36 @max-3xl:hidden">Area</Head>
+          <Head k="severity" className="w-24 @max-3xl:w-8">
+            <span className="@max-3xl:sr-only">Severity</span>
+          </Head>
+          <Head className="w-20 @max-3xl:w-14">
+            <span className="sr-only">Flags</span>
+          </Head>
+          <Head className="w-16 @max-3xl:w-12">
+            <span className="sr-only">People</span>
+          </Head>
+          <Head k="updated" className="w-20 pr-4 text-right">
             Updated
           </Head>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.length === 0 && loading && (
-          <>
-            {Array.from({ length: 8 }, (_, i) => (
-              <TableRow key={i}>
-                <TableCell colSpan={9} className="py-3">
-                  <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
-                </TableCell>
-              </TableRow>
-            ))}
-          </>
-        )}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 &&
+          loading &&
+          Array.from({ length: 10 }, (_, i) => (
+            <tr key={i} className="h-9 border-b border-border/60">
+              <td colSpan={10} className="px-4">
+                <div className="flex items-center gap-3">
+                  <div className="size-3.5 animate-pulse rounded-full bg-muted" />
+                  <div className="h-3 w-8 animate-pulse rounded bg-muted" />
+                  <div
+                    className="h-3 animate-pulse rounded bg-muted"
+                    style={{ width: `${35 + ((i * 17) % 40)}%` }}
+                  />
+                </div>
+              </td>
+            </tr>
+          ))}
         {rows.length === 0 && !loading && (
-          <TableRow>
-            <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
+          <tr>
+            <td colSpan={10} className="py-20 text-center text-muted-foreground">
               {emptyText}
-            </TableCell>
-          </TableRow>
+            </td>
+          </tr>
         )}
         {rows.map((r) => {
           const viewers = r.issue.presence.filter((p) => p.updated_at > now - PRESENCE_TTL_MS);
           const feedbackPeople = r.feedbackUsers
             .map((id) => users.get(id))
             .filter((u): u is UserInfo => !!u);
+          const selected = selectedId === r.issue.id;
+          const status = r.issue.classifying
+            ? "classifying"
+            : r.unclassified
+              ? "unclassified"
+              : r.needsReview
+                ? "review"
+                : r.effective.category.source === "human"
+                  ? "human"
+                  : "model";
+          const labels = r.issue.labels.length
+            ? r.issue.labels.map((l) => ({ name: l.name, color: `#${l.color}` }))
+            : r.issue.labels_json.map((name) => ({ name, color: undefined }));
           return (
-            <TableRow
+            <tr
               key={r.issue.id}
-              className={cn(
-                "row-enter cursor-pointer transition-colors",
-                selectedId === r.issue.id && "bg-accent",
-              )}
               data-issue-id={r.issue.id}
+              data-state={selected ? "selected" : undefined}
               onClick={() => onOpen(r.issue.id)}
-              data-state={selectedId === r.issue.id ? "selected" : undefined}
+              className="row-enter h-9 cursor-pointer border-b border-border/60 hover:bg-accent/50 data-[state=selected]:bg-accent"
             >
-              <TableCell className="tabular-nums text-muted-foreground">{r.issue.number}</TableCell>
-              <TableCell className="max-w-[28rem]">
-                <div className="truncate font-medium" title={r.issue.title}>
-                  {r.issue.title}
-                </div>
-                <div className="mt-0.5 flex flex-wrap gap-1">
-                  {r.issue.state === "closed" && <Badge variant="outline">closed</Badge>}
-                  {r.issue.labels_json.slice(0, 4).map((l) => (
-                    <Badge key={l} variant="secondary" className="font-normal">
-                      {l}
-                    </Badge>
-                  ))}
-                </div>
-              </TableCell>
-              <TableCell>
-                {r.issue.classifying && r.unclassified ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-dashed px-2 py-0.5 text-xs text-muted-foreground">
-                    <span className="size-2 animate-pulse rounded-full bg-[#2a78d6]" /> classifying
-                  </span>
-                ) : (
-                  <CategoryChip
-                    value={r.category}
-                    confidence={r.categoryConfidence}
-                    source={r.effective.category.source}
-                  />
-                )}
-              </TableCell>
-              <TableCell className="text-xs">
-                {r.area ?? <span className="text-muted-foreground">—</span>}
-              </TableCell>
-              <TableCell>
-                <Meter value={r.severity} label="severity" />
-              </TableCell>
-              <TableCell>
-                <Meter
-                  value={r.unclassified ? null : r.priority}
-                  label="priority"
-                  color="#2a78d6"
+              <td className="pl-4 text-foreground/70">
+                <PriorityBars value={r.unclassified ? null : r.priority} />
+              </td>
+              <td className="px-2 text-xs text-muted-foreground tabular-nums">{r.issue.number}</td>
+              <td className="px-1">
+                <StatusIcon
+                  status={status}
+                  confidence={r.categoryConfidence}
+                  hint={status === "review" ? r.reviewReasons.join("; ") : undefined}
                 />
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-wrap gap-1">
+              </td>
+              <td className="max-w-0 px-2">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <span
+                    className={cn(
+                      "min-w-0 flex-1 truncate font-medium",
+                      r.issue.state === "closed" && "text-muted-foreground line-through",
+                    )}
+                    title={r.issue.title}
+                  >
+                    {r.issue.title}
+                  </span>
+                  {labels.length > 0 && (
+                    <span className="flex shrink-0 gap-1 @max-4xl:hidden">
+                      {labels.slice(0, 3).map((l) => (
+                        <Pill key={l.name} color={l.color} muted>
+                          {l.name}
+                        </Pill>
+                      ))}
+                      {labels.length > 3 && <Pill muted>+{labels.length - 3}</Pill>}
+                    </span>
+                  )}
+                </div>
+              </td>
+              <td className="px-2">
+                <CategoryChip
+                  value={r.category}
+                  confidence={r.categoryConfidence}
+                  source={r.effective.category.source}
+                />
+              </td>
+              <td className="max-w-0 truncate px-2 text-xs text-muted-foreground @max-3xl:hidden">
+                {r.area ?? "—"}
+              </td>
+              <td className="px-2 text-xs">
+                <SeverityMark value={r.severity} labelClassName="@max-3xl:hidden" />
+              </td>
+              <td className="px-2">
+                <span className="flex items-center gap-1.5 text-muted-foreground">
                   {r.needsInfo && (
-                    <Badge variant="outline" className="gap-1">
-                      <HelpCircle className="size-3" /> needs info
-                    </Badge>
+                    <Flag hint="Needs more information">
+                      <CircleHelp className="size-3.5" />
+                    </Flag>
                   )}
                   {r.duplicateOf && (
-                    <Badge variant="outline" className="gap-1">
-                      <Copy className="size-3" /> dup of {dupLabel(r.duplicateOf)}
-                    </Badge>
+                    <Flag hint={`Possible duplicate of ${dupLabel(r.duplicateOf)}`}>
+                      <Copy className="size-3.5" />
+                    </Flag>
                   )}
-                  {r.needsReview && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Badge variant="destructive">review</Badge>
-                      </TooltipTrigger>
-                      <TooltipContent>{r.reviewReasons.join("; ")}</TooltipContent>
-                    </Tooltip>
+                  {r.issue.comments > 0 && (
+                    <Flag hint={`${r.issue.comments} comments`}>
+                      <span className="inline-flex items-center gap-0.5 text-2xs tabular-nums">
+                        <MessageSquare className="size-3" />
+                        {r.issue.comments}
+                      </span>
+                    </Flag>
                   )}
-                  {r.issue.reclassify && <Badge variant="secondary">reclassifying…</Badge>}
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex items-center gap-2">
+                  {r.issue.reclassify && !r.issue.classifying && (
+                    <Flag hint="Queued for reclassification">
+                      <span className="size-1.5 rounded-full bg-status-warning" />
+                    </Flag>
+                  )}
+                </span>
+              </td>
+              <td className="px-2">
+                <span className="flex items-center gap-1.5">
                   <AvatarStack
+                    size="xs"
                     people={feedbackPeople.map((u) => ({
                       key: u.id,
                       name: u.name,
@@ -196,6 +241,7 @@ export function IssueTable({
                     }))}
                   />
                   <AvatarStack
+                    size="xs"
                     people={viewers.map((v) => ({
                       key: v.user_id,
                       name: v.name,
@@ -203,15 +249,28 @@ export function IssueTable({
                       hint: `${v.name} is viewing`,
                     }))}
                   />
-                </div>
-              </TableCell>
-              <TableCell className="whitespace-nowrap text-right text-xs text-muted-foreground">
-                {ago(r.issue.updated_at, now)}
-              </TableCell>
-            </TableRow>
+                </span>
+              </td>
+              <td className="pr-4 pl-2 text-right text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+                {agoShort(r.issue.updated_at, now)}
+              </td>
+            </tr>
           );
         })}
-      </TableBody>
-    </Table>
+      </tbody>
+    </table>
+  );
+}
+
+function Flag({ hint, children }: { hint: string; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex items-center" aria-label={hint}>
+          {children}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
   );
 }

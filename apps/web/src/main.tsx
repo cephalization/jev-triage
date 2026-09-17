@@ -6,10 +6,13 @@ import { App } from "./App.tsx";
 import { Login } from "./components/Login.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 import { loadSession, saveSession, type Session } from "./lib/auth.ts";
+import { applyTheme, loadTheme } from "./lib/theme.ts";
 import "./index.css";
 
 const CACHE_URL =
   (import.meta.env.VITE_ZERO_CACHE_URL as string | undefined) ?? "http://localhost:4848";
+
+applyTheme(loadTheme());
 
 function Root() {
   const [session, setSession] = useState<Session | null>(() => loadSession());
@@ -24,7 +27,7 @@ function Root() {
       mutators={mutators}
       kvStore="idb"
     >
-      <TooltipProvider>
+      <TooltipProvider delayDuration={300}>
         <App
           session={session}
           onLogout={() => {
