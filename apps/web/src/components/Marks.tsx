@@ -1,5 +1,5 @@
 import { cn } from "cn";
-import { Check, CircleAlert, CircleDashed } from "lucide-react";
+import { Check, Circle, CircleAlert, CircleDashed, Eye, GitBranch, Sparkles } from "lucide-react";
 import {
   ACTION_META,
   CATEGORY_COLORS,
@@ -12,7 +12,10 @@ import {
 } from "../lib/format.ts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
-/** Confidence ring: distribution concentration, not correctness. */
+/**
+ * Confidence ring: distribution concentration, not correctness. Only used inside the
+ * "What the model saw" details, never in a list, where it reads as progress.
+ */
 export function ConfidenceRing({
   value,
   size = 14,
@@ -60,8 +63,9 @@ export function ConfidenceRing({
 export type IssueStatus = "unclassified" | "classifying" | "model" | "human" | "review";
 
 /**
- * Linear-style status circle. Two states matter to a maintainer: suggested (the ring) and
- * confirmed by a person (the check). The warning marks a suggestion the model was unsure of.
+ * Where the app's judgment on this row stands. Four distinct shapes, none of them a ring:
+ * a spark for a model suggestion, a check for a person's confirmation, a warning when the
+ * model was unsure, a dashed circle when nothing has been asked yet.
  */
 export function StatusIcon({
   status,
@@ -89,9 +93,7 @@ export function StatusIcon({
           {status === "classifying" && (
             <span className="size-3.5 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
           )}
-          {status === "model" && (
-            <ConfidenceRing value={confidence ?? 0} className="text-primary" />
-          )}
+          {status === "model" && <Sparkles className="size-3.5 text-primary/70" />}
           {status === "human" && (
             <span className="inline-flex size-3.5 items-center justify-center rounded-full bg-status-good text-white">
               <Check className="size-2.5" strokeWidth={3} />
@@ -176,7 +178,11 @@ export function SeverityMark({
   );
 }
 
-/** Label pill: colored dot, name, hairline border (Linear's label chip). */
+/**
+ * Two shapes with two meanings. A judgment pill (round, hairline border, colored dot) is
+ * something this app decided or a person confirmed. A tag (square corners, filled, no dot)
+ * is a fact mirrored from GitHub, such as a label.
+ */
 export function Pill({
   color,
   children,
@@ -203,6 +209,19 @@ export function Pill({
       )}
       <span className="truncate">{children}</span>
       {trailing}
+    </span>
+  );
+}
+
+export function Tag({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-5 max-w-36 shrink-0 items-center rounded-sm bg-muted px-1.5 text-2xs whitespace-nowrap text-muted-foreground",
+        className,
+      )}
+    >
+      <span className="truncate">{children}</span>
     </span>
   );
 }
@@ -335,7 +354,10 @@ export function EffortMark({
   );
 }
 
-/** Where a pull request stands with reviewers: approved, changes requested, or waiting. */
+/**
+ * Where a pull request stands with reviewers on GitHub. Plain state glyphs: an empty circle
+ * while nobody has looked, an eye while a review is underway, a check or a warning after.
+ */
 export function ReviewDecisionMark({
   decision,
   draft,
@@ -360,8 +382,8 @@ export function ReviewDecisionMark({
       : decision === "CHANGES_REQUESTED"
         ? ["Changes requested", <CircleAlert key="c" className="size-3.5 text-status-serious" />]
         : hasReviews
-          ? ["In review", <ConfidenceRing key="r" value={0.5} className="text-primary" />]
-          : ["Awaiting review", <ConfidenceRing key="w" value={0} className="text-primary" />];
+          ? ["In review", <Eye key="r" className="size-3.5 text-muted-foreground" />]
+          : ["Awaiting review", <Circle key="w" className="size-3.5 text-muted-foreground/60" />];
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -371,5 +393,71 @@ export function ReviewDecisionMark({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/**
+ * Section eyebrow for the detail panels: what this app decided (triage) versus what is
+ * mirrored from GitHub. The triage section also sits on a tinted surface.
+ */
+export function SectionLabel({
+  kind,
+  children,
+  trailing,
+}: {
+  kind: "triage" | "github";
+  children: React.ReactNode;
+  trailing?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-2 flex items-center gap-1.5 text-2xs font-medium tracking-wider uppercase">
+      {kind === "triage" ? (
+        <Sparkles className="size-3 text-primary" />
+      ) : (
+        <GitBranch className="size-3 text-muted-foreground" />
+      )}
+      <span className={kind === "triage" ? "text-primary" : "text-muted-foreground"}>
+        {children}
+      </span>
+      {trailing && (
+        <span className="ml-auto font-normal normal-case tracking-normal">{trailing}</span>
+      )}
+    </div>
+  );
+}
+
+/** Column-group header cell: the same triage/GitHub split, over a table. */
+export function GroupHead({
+  kind,
+  colSpan,
+  className,
+}: {
+  kind: "triage" | "github" | "none";
+  colSpan: number;
+  className?: string;
+}) {
+  return (
+    <th
+      colSpan={colSpan}
+      className={cn(
+        "sticky top-8 z-10 h-5 bg-background px-2 text-left text-2xs font-medium tracking-wider uppercase",
+        kind === "triage" && "text-primary/80",
+        kind === "github" && "text-muted-foreground/80",
+        className,
+      )}
+    >
+      {kind === "triage" && (
+        <span className="inline-flex items-center gap-1">
+          <Sparkles className="size-2.5" />
+          Triage
+        </span>
+      )}
+      {kind === "github" && (
+        <span className="inline-flex items-center gap-1">
+          <GitBranch className="size-2.5" />
+          GitHub
+        </span>
+      )}
+    </th>
   );
 }

@@ -7,7 +7,7 @@ import {
   numeric,
   queries,
 } from "@triage/schema";
-import { ACTION_LABELS, SEVERITY_LEVELS, URGENCY_LEVELS } from "@triage/triage/types";
+import { SEVERITY_LEVELS, URGENCY_LEVELS } from "@triage/triage/types";
 import { cn } from "cn";
 import { Check, CircleCheck, ExternalLink, Hand, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -26,7 +26,7 @@ import {
 import { viewersOf } from "../lib/presence.ts";
 import { Avatar } from "./Avatar.tsx";
 import type { UserInfo } from "./IssueTable.tsx";
-import { ActionPill, CategoryChip, Pill, ProbStrip, StatusIcon } from "./Marks.tsx";
+import { ActionPill, CategoryChip, ProbStrip, SectionLabel, StatusIcon, Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { Textarea } from "./ui/textarea.tsx";
@@ -79,9 +79,10 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 /**
- * Non-modal details panel (split view). The list stays live and clickable; j/k move the
- * selection, Esc closes. In the panel: 1–6 set the category, a accepts the suggestion,
- * c claims, x marks done.
+ * Non-modal details panel (split view), in two clearly separated halves: what this app
+ * decided (the tinted Triage section, editable) and what is mirrored from GitHub (plain,
+ * read-only). j/k move the selection, Esc closes. In the panel: 1–6 set the category,
+ * a accepts the suggestion, c claims, x marks done.
  */
 export function IssuePanel({
   issueId,
@@ -269,6 +270,7 @@ export function IssuePanel({
     });
   const viewers = viewersOf(issue.presence, now).filter((v) => v.user_id !== claimedBy);
   const owner = claimedBy ? users.get(claimedBy) : undefined;
+  const labels = issue.labels.length ? issue.labels.map((l) => l.name) : [...issue.labels_json];
   const events = [
     ...issue.feedback.map((f) => ({
       key: f.id,
@@ -327,7 +329,7 @@ export function IssuePanel({
           target="_blank"
           rel="noreferrer"
         >
-          GitHub <ExternalLink className="size-3" />
+          Open on GitHub <ExternalLink className="size-3" />
         </a>
         <span className="flex-1" />
         <span className="flex -space-x-1">
@@ -364,20 +366,26 @@ export function IssuePanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex flex-col gap-2 px-4 pt-4 pb-3">
+        <div className="flex flex-col gap-1.5 px-4 pt-4 pb-3">
           <h2 className="text-[0.9375rem] font-semibold text-balance">{issue.title}</h2>
           <p className="text-xs text-muted-foreground">
-            {issue.author} · {issue.state} · {issue.comments} comments · {issue.reactions} reactions
-            · opened {ago(issue.created_at, now)}
+            {issue.author} · {issue.state} · opened {ago(issue.created_at, now)}
           </p>
         </div>
 
-        <section className="border-t px-4 py-3">
-          <div className="mb-2 flex items-center gap-2">
-            <StatusIcon status={status} confidence={eff.action.confidence} />
-            <h3 className="text-xs font-medium text-muted-foreground">{statusText}</h3>
-            {done && <Pill muted>triaged</Pill>}
-          </div>
+        <section className="border-y bg-primary/[0.04] px-4 py-3">
+          <SectionLabel
+            kind="triage"
+            trailing={
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <StatusIcon status={status} confidence={eff.action.confidence} />
+                {statusText}
+                {done && <Tag>triaged</Tag>}
+              </span>
+            }
+          >
+            Triage
+          </SectionLabel>
           {why && <p className="mb-3 text-sm text-foreground/80">{why}</p>}
           <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-2 gap-y-1">
             <dt className="text-xs text-muted-foreground">Next step</dt>
@@ -552,19 +560,6 @@ export function IssuePanel({
                 </Button>
               </div>
             </dd>
-
-            {issue.labels.length > 0 && (
-              <>
-                <dt className="self-start pt-1.5 text-xs text-muted-foreground">Labels</dt>
-                <dd className="flex flex-wrap gap-1 px-2 py-1">
-                  {issue.labels.map((l) => (
-                    <Pill key={l.id} color={`#${l.color}`} muted>
-                      {l.name}
-                    </Pill>
-                  ))}
-                </dd>
-              </>
-            )}
           </dl>
           <Textarea
             rows={2}
@@ -587,9 +582,41 @@ export function IssuePanel({
           )}
         </section>
 
-        <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Description</h3>
-          <div className="max-h-96 overflow-auto text-sm leading-5 whitespace-pre-wrap text-foreground/90">
+        <section className="px-4 py-3">
+          <SectionLabel kind="github">On GitHub</SectionLabel>
+          <dl className="grid grid-cols-[6.5rem_1fr] items-baseline gap-x-2 gap-y-1 text-sm">
+            <dt className="text-xs text-muted-foreground">State</dt>
+            <dd>
+              {issue.state}
+              {issue.closed_at ? ` · closed ${ago(issue.closed_at, now)}` : ""}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Author</dt>
+            <dd>
+              {issue.author}
+              {issue.author_association && issue.author_association !== "NONE" && (
+                <span className="text-xs text-muted-foreground">
+                  {" "}
+                  · {issue.author_association.toLowerCase()}
+                </span>
+              )}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Activity</dt>
+            <dd className="tabular-nums">
+              {issue.comments} comments · {issue.reactions} reactions · updated{" "}
+              {ago(issue.updated_at, now)}
+            </dd>
+            {labels.length > 0 && (
+              <>
+                <dt className="self-start pt-1 text-xs text-muted-foreground">Labels</dt>
+                <dd className="flex flex-wrap gap-1">
+                  {labels.map((l) => (
+                    <Tag key={l}>{l}</Tag>
+                  ))}
+                </dd>
+              </>
+            )}
+          </dl>
+          <div className="mt-3 max-h-96 overflow-auto text-sm leading-5 whitespace-pre-wrap text-foreground/90">
             {issue.body || <span className="text-muted-foreground">No description.</span>}
           </div>
         </section>
@@ -648,7 +675,7 @@ export function IssuePanel({
         </details>
 
         <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Activity</h3>
+          <SectionLabel kind="triage">Triage activity</SectionLabel>
           {events.length === 0 && (
             <p className="text-xs text-muted-foreground">Nobody has touched this yet.</p>
           )}
@@ -669,5 +696,3 @@ export function IssuePanel({
     </aside>
   );
 }
-
-export const ACTION_KEYS = ACTION_LABELS;

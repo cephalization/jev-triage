@@ -41,15 +41,17 @@ export function AvatarStack({
   people,
   max = 3,
   size = "sm",
+  className,
 }: {
   people: readonly { key: string; name: string; color: string; hint?: string }[];
   max?: number;
   size?: "xs" | "sm" | "md";
+  className?: string;
 }) {
   if (people.length === 0) return null;
   const shown = people.slice(0, max);
   return (
-    <span className="flex -space-x-1">
+    <span className={cn("flex -space-x-1", className)}>
       {shown.map((p) => (
         <Avatar key={p.key} name={p.name} color={p.color} hint={p.hint} size={size} />
       ))}

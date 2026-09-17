@@ -2,21 +2,23 @@ import { cn } from "cn";
 import { ArrowDown, ArrowUp, ArrowLeftRight, Check, MessageSquare } from "lucide-react";
 import type { PullGroup, PullRow, PullSortKey, ReviewerMode } from "../lib/derive.ts";
 import { agoShort, compact, pct } from "../lib/format.ts";
-import { AvatarStack } from "./Avatar.tsx";
 import type { UserInfo } from "./IssueTable.tsx";
 import {
-  ConfidenceRing,
   EffortMark,
-  Pill,
+  GroupHead,
   PriorityBars,
   ReviewDecisionMark,
   StatusIcon,
+  Tag,
 } from "./Marks.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
-/** Column header sits under the 32px page toolbar; group rows stack under both. */
+/** Same sticky stack as the issue table: view strip, group header, column header, sections. */
 const TH =
-  "sticky top-8 z-10 h-8 bg-background px-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_var(--border)]";
+  "sticky top-[52px] z-10 h-8 bg-background px-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_var(--border)]";
+const SECTION_TOP = "top-[84px]";
+
+const COLUMNS = 11;
 
 export interface GroupInfo {
   approvals: number;
@@ -28,7 +30,7 @@ export function PullTable({
   groups,
   groupInfo,
   reviewerMode = "balanced",
-  users,
+  users: _users,
   now,
   sort,
   onSort,
@@ -84,35 +86,64 @@ export function PullTable({
 
   return (
     <table className="w-full table-fixed border-collapse text-sm">
+      {/* Fixed layout takes widths from <col>, so the spanning group row cannot skew them. */}
+      <colgroup>
+        <col className="w-8" />
+        <col className="w-14" />
+        <col className="w-6" />
+        <col />
+        <col className="w-28 @max-3xl:w-8" />
+        <col className="w-36" />
+        <col className="w-36 @max-5xl:w-28 @max-3xl:w-24" />
+        <col className="w-6" />
+        <col className="w-28 @max-4xl:w-0" />
+        <col className="w-12 @max-3xl:w-0" />
+        <col className="w-20" />
+      </colgroup>
       <thead>
         <tr>
-          <Head k="priority" className="w-8 pl-4">
+          <GroupHead kind="none" colSpan={4} />
+          <GroupHead kind="triage" colSpan={2} className="border-l border-border/60" />
+          <GroupHead
+            kind="github"
+            colSpan={5}
+            className="border-l border-border/60 @max-4xl:hidden"
+          />
+          <GroupHead
+            kind="github"
+            colSpan={4}
+            className="hidden border-l border-border/60 @max-4xl:table-cell @max-3xl:hidden"
+          />
+          <GroupHead
+            kind="github"
+            colSpan={3}
+            className="hidden border-l border-border/60 @max-3xl:table-cell"
+          />
+        </tr>
+        <tr>
+          <Head k="priority" className="pl-4">
             <span className="sr-only">Attention</span>
           </Head>
-          <Head k="number" className="w-14">
-            #
-          </Head>
-          <Head className="w-6">
+          <Head k="number">#</Head>
+          <Head>
             <span className="sr-only">Status</span>
           </Head>
           <Head>Title</Head>
-          <Head className="w-28 @max-4xl:hidden">Author</Head>
-          <Head k="size" className="w-36 @max-5xl:w-24 @max-3xl:w-20">
-            Size
-          </Head>
-          <Head k="effort" className="w-28 @max-3xl:w-8">
+          <Head k="effort" className="border-l border-border/60">
             <span className="@max-3xl:sr-only">Effort</span>
           </Head>
-          <Head k="reviewer" className="w-36">
-            Reviewer
+          <Head k="reviewer">Reviewer</Head>
+          <Head k="size" className="border-l border-border/60">
+            Size
           </Head>
-          <Head className="w-6">
+          <Head>
             <span className="sr-only">Review state</span>
           </Head>
-          <Head className="w-14 @max-3xl:hidden">
-            <span className="sr-only">People</span>
+          <Head className="@max-4xl:hidden">Author</Head>
+          <Head className="@max-3xl:hidden">
+            <span className="sr-only">Comments</span>
           </Head>
-          <Head k="updated" className="w-20 pr-4 text-right">
+          <Head k="updated" className="pr-4 text-right">
             Updated
           </Head>
         </tr>
@@ -122,7 +153,7 @@ export function PullTable({
           loading &&
           Array.from({ length: 10 }, (_, i) => (
             <tr key={i} className="h-9 border-b border-border/60">
-              <td colSpan={11} className="px-4">
+              <td colSpan={COLUMNS} className="px-4">
                 <div className="flex items-center gap-3">
                   <div className="size-3.5 animate-pulse rounded-full bg-muted" />
                   <div className="h-3 w-8 animate-pulse rounded bg-muted" />
@@ -136,7 +167,7 @@ export function PullTable({
           ))}
         {rows.length === 0 && !loading && (
           <tr>
-            <td colSpan={11} className="py-20 text-center text-muted-foreground">
+            <td colSpan={COLUMNS} className="py-20 text-center text-muted-foreground">
               {emptyText}
             </td>
           </tr>
@@ -147,8 +178,11 @@ export function PullTable({
             : [
                 <tr key={`group:${g.login ?? ""}`} className="h-8">
                   <td
-                    colSpan={11}
-                    className="sticky top-16 z-[5] bg-background px-4 text-xs shadow-[inset_0_-1px_0_var(--border)] before:absolute before:inset-0 before:-z-10 before:bg-muted/40"
+                    colSpan={COLUMNS}
+                    className={cn(
+                      "sticky z-[5] bg-background px-4 text-xs shadow-[inset_0_-1px_0_var(--border)] before:absolute before:inset-0 before:-z-10 before:bg-muted/40",
+                      SECTION_TOP,
+                    )}
                   >
                     <span className="font-medium text-foreground">
                       {g.login ?? "No suggestion"}
@@ -177,9 +211,6 @@ export function PullTable({
                   : r.reviewerSource === "human" || r.effective.review_effort.source === "human"
                     ? "human"
                     : "model";
-            const feedbackPeople = r.feedbackUsers
-              .map((id) => users.get(id))
-              .filter((u): u is UserInfo => !!u);
             return (
               <tr
                 key={p.id}
@@ -201,7 +232,7 @@ export function PullTable({
                 </td>
                 <td className="max-w-0 px-2">
                   <div className="flex items-center gap-2 overflow-hidden">
-                    {p.draft && <Pill muted>draft</Pill>}
+                    {p.draft && <Tag>draft</Tag>}
                     <span
                       className={cn(
                         "min-w-0 flex-1 truncate font-medium",
@@ -215,31 +246,26 @@ export function PullTable({
                     {p.labels_json.length > 0 && (
                       <span className="flex shrink-0 gap-1 @max-4xl:hidden">
                         {p.labels_json.slice(0, 2).map((l) => (
-                          <Pill key={l} muted>
-                            {l}
-                          </Pill>
+                          <Tag key={l}>{l}</Tag>
                         ))}
-                        {p.labels_json.length > 2 && <Pill muted>+{p.labels_json.length - 2}</Pill>}
+                        {p.labels_json.length > 2 && <Tag>+{p.labels_json.length - 2}</Tag>}
                       </span>
                     )}
                   </div>
                 </td>
-                <td className="max-w-0 truncate px-2 text-xs text-muted-foreground @max-4xl:hidden">
-                  {p.author}
+                <td className="border-l border-border/60 px-2 text-xs">
+                  <EffortMark value={r.effort} labelClassName="@max-3xl:hidden" />
                 </td>
-                <td className="px-2 text-xs whitespace-nowrap tabular-nums">
+                <td className="max-w-0 px-2 text-xs">
+                  <ReviewerCell row={r} mode={reviewerMode} />
+                </td>
+                <td className="border-l border-border/60 px-2 text-xs whitespace-nowrap tabular-nums">
                   <span className="text-status-good">+{compact(p.additions)}</span>{" "}
                   <span className="text-status-critical">−{compact(p.deletions)}</span>
                   <span className="text-muted-foreground @max-5xl:hidden">
                     {" "}
                     · {p.changed_files} {p.changed_files === 1 ? "file" : "files"}
                   </span>
-                </td>
-                <td className="px-2 text-xs">
-                  <EffortMark value={r.effort} labelClassName="@max-3xl:hidden" />
-                </td>
-                <td className="max-w-0 px-2 text-xs">
-                  <ReviewerCell row={r} mode={reviewerMode} />
                 </td>
                 <td className="px-1">
                   <ReviewDecisionMark
@@ -248,24 +274,16 @@ export function PullTable({
                     hasReviews={p.reviews.length > 0}
                   />
                 </td>
-                <td className="px-2 @max-3xl:hidden">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
-                    <AvatarStack
-                      size="xs"
-                      people={feedbackPeople.map((u) => ({
-                        key: u.id,
-                        name: u.name,
-                        color: u.color,
-                        hint: `${u.name} gave feedback`,
-                      }))}
-                    />
-                    {p.comments > 0 && (
-                      <span className="inline-flex items-center gap-0.5 text-2xs tabular-nums">
-                        <MessageSquare className="size-3" />
-                        {p.comments}
-                      </span>
-                    )}
-                  </span>
+                <td className="max-w-0 truncate px-2 text-xs text-muted-foreground @max-4xl:hidden">
+                  {p.author}
+                </td>
+                <td className="px-2 text-muted-foreground @max-3xl:hidden">
+                  {p.comments > 0 && (
+                    <span className="inline-flex items-center gap-0.5 text-2xs tabular-nums">
+                      <MessageSquare className="size-3" />
+                      {p.comments}
+                    </span>
+                  )}
                 </td>
                 <td className="pr-4 pl-2 text-right text-xs whitespace-nowrap text-muted-foreground tabular-nums">
                   {agoShort(p.updated_at, now)}
@@ -281,7 +299,8 @@ export function PullTable({
 
 /**
  * Suggested reviewer. Balanced mode: a person's pick, else the load-balanced assignment from the
- * model's distribution. Model mode: the raw pick, with its share of the distribution.
+ * model's distribution. Model mode: the raw pick, with its share of the distribution. A check
+ * marks a person's pick; the arrows mark a balanced reassignment; the share lives in the tooltip.
  */
 function ReviewerCell({ row, mode }: { row: PullRow; mode: ReviewerMode }) {
   const human = row.reviewerSource === "human";
@@ -296,11 +315,7 @@ function ReviewerCell({ row, mode }: { row: PullRow; mode: ReviewerMode }) {
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex max-w-full items-center gap-1.5">
-            {human ? (
-              <Check className="size-3 shrink-0 text-status-good" strokeWidth={3} />
-            ) : (
-              <ConfidenceRing value={p ?? 0} size={12} className="text-primary" />
-            )}
+            {human && <Check className="size-3 shrink-0 text-status-good" strokeWidth={3} />}
             <span className="truncate">{row.reviewer}</span>
           </span>
         </TooltipTrigger>
@@ -327,11 +342,7 @@ function ReviewerCell({ row, mode }: { row: PullRow; mode: ReviewerMode }) {
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="inline-flex max-w-full items-center gap-1.5">
-          {human ? (
-            <Check className="size-3 shrink-0 text-status-good" strokeWidth={3} />
-          ) : (
-            <ConfidenceRing value={a.probability} size={12} className="text-primary" />
-          )}
+          {human && <Check className="size-3 shrink-0 text-status-good" strokeWidth={3} />}
           <span className="truncate">{a.login}</span>
           {a.balanced && <ArrowLeftRight className="size-3 shrink-0 text-muted-foreground" />}
         </span>

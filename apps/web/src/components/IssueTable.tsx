@@ -7,10 +7,11 @@ import { Avatar, AvatarStack } from "./Avatar.tsx";
 import {
   ActionPill,
   CategoryChip,
-  Pill,
+  GroupHead,
   PriorityBars,
   SeverityMark,
   StatusIcon,
+  Tag,
 } from "./Marks.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
@@ -20,11 +21,15 @@ export interface UserInfo {
   color: string;
 }
 
-/** Column header sits under the 32px view strip; group rows stack under both. */
+/**
+ * Sticky stack: the 32px view strip, a 20px group header (Triage | GitHub), the 32px column
+ * header, then section rows. Offsets are the running sum.
+ */
 const TH =
-  "sticky top-8 z-10 h-8 bg-background px-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_var(--border)]";
+  "sticky top-[52px] z-10 h-8 bg-background px-2 text-left text-xs font-medium whitespace-nowrap text-muted-foreground shadow-[inset_0_-1px_0_var(--border)]";
+const SECTION_TOP = "top-[84px]";
 
-const COLUMNS = 10;
+const COLUMNS = 11;
 
 export function IssueTable({
   rows,
@@ -50,6 +55,7 @@ export function IssueTable({
   loading?: boolean;
   emptyText?: string;
 }) {
+  const grouped = !!groups;
   const Head = ({
     k,
     children,
@@ -81,32 +87,70 @@ export function IssueTable({
 
   return (
     <table className="w-full table-fixed border-collapse text-sm">
+      {/* Fixed layout takes widths from <col>, so the spanning group row cannot skew them. */}
+      <colgroup>
+        <col className="w-8" />
+        <col className="w-14" />
+        <col className="w-6" />
+        <col />
+        <col className={cn("w-28", grouped && "w-0")} />
+        <col className="w-24" />
+        <col className="w-24 @max-3xl:w-8" />
+        <col className="w-8 @max-3xl:w-0" />
+        <col className="w-16 @max-3xl:w-9" />
+        <col className="w-12 @max-3xl:w-0" />
+        <col className="w-20 @max-3xl:w-14" />
+      </colgroup>
       <thead>
         <tr>
-          <Head k="priority" className="w-8 pl-4">
+          <GroupHead kind="none" colSpan={4} />
+          <GroupHead
+            kind="triage"
+            colSpan={grouped ? 4 : 5}
+            className="border-l border-border/60 @max-3xl:hidden"
+          />
+          <GroupHead
+            kind="triage"
+            colSpan={grouped ? 3 : 4}
+            className="hidden border-l border-border/60 @max-3xl:table-cell"
+          />
+          <GroupHead
+            kind="github"
+            colSpan={2}
+            className="border-l border-border/60 @max-3xl:hidden"
+          />
+          <GroupHead
+            kind="github"
+            colSpan={1}
+            className="hidden border-l border-border/60 @max-3xl:table-cell"
+          />
+        </tr>
+        <tr>
+          <Head k="priority" className="pl-4">
             <span className="sr-only">Priority</span>
           </Head>
-          <Head k="number" className="w-14">
-            #
-          </Head>
-          <Head className="w-6">
+          <Head k="number">#</Head>
+          <Head>
             <span className="sr-only">Status</span>
           </Head>
           <Head>Title</Head>
-          <Head className={cn("w-28", groups && "hidden")}>Next step</Head>
-          <Head k="category" className="w-24">
+          <Head className={cn("border-l border-border/60", grouped && "hidden")}>Next step</Head>
+          <Head k="category" className={cn(grouped && "border-l border-border/60")}>
             Category
           </Head>
-          <Head k="severity" className="w-24 @max-3xl:w-8">
+          <Head k="severity">
             <span className="@max-3xl:sr-only">Severity</span>
           </Head>
-          <Head className="w-14">
-            <span className="sr-only">Marks</span>
+          <Head className="@max-3xl:hidden">
+            <span className="sr-only">Duplicate</span>
           </Head>
-          <Head className="w-16 @max-3xl:w-12">
+          <Head>
             <span className="sr-only">People</span>
           </Head>
-          <Head k="updated" className="w-20 pr-4 text-right">
+          <Head className="border-l border-border/60 @max-3xl:hidden">
+            <span className="sr-only">Comments</span>
+          </Head>
+          <Head k="updated" className="pr-4 text-right @max-3xl:border-l @max-3xl:border-border/60">
             Updated
           </Head>
         </tr>
@@ -142,7 +186,10 @@ export function IssueTable({
                 <tr key={`group:${g.action ?? ""}`} className="h-8">
                   <td
                     colSpan={COLUMNS}
-                    className="sticky top-16 z-[5] bg-background px-4 text-xs shadow-[inset_0_-1px_0_var(--border)] before:absolute before:inset-0 before:-z-10 before:bg-muted/40"
+                    className={cn(
+                      "sticky z-[5] bg-background px-4 text-xs shadow-[inset_0_-1px_0_var(--border)] before:absolute before:inset-0 before:-z-10 before:bg-muted/40",
+                      SECTION_TOP,
+                    )}
                   >
                     <span className="inline-flex items-center gap-2 font-medium text-foreground">
                       {g.action && (
@@ -171,7 +218,7 @@ export function IssueTable({
               users={users}
               now={now}
               selected={selectedId === r.issue.id}
-              grouped={!!groups}
+              grouped={grouped}
               onOpen={onOpen}
             />
           )),
@@ -208,8 +255,8 @@ function Row({
           ? "human"
           : "model";
   const labels = r.issue.labels.length
-    ? r.issue.labels.map((l) => ({ name: l.name, color: `#${l.color}` }))
-    : r.issue.labels_json.map((name) => ({ name, color: undefined }));
+    ? r.issue.labels.map((l) => l.name)
+    : [...r.issue.labels_json];
   return (
     <tr
       data-issue-id={r.issue.id}
@@ -243,40 +290,28 @@ function Row({
           {labels.length > 0 && (
             <span className="flex shrink-0 gap-1 @max-4xl:hidden">
               {labels.slice(0, 2).map((l) => (
-                <Pill key={l.name} color={l.color} muted>
-                  {l.name}
-                </Pill>
+                <Tag key={l}>{l}</Tag>
               ))}
-              {labels.length > 2 && <Pill muted>+{labels.length - 2}</Pill>}
+              {labels.length > 2 && <Tag>+{labels.length - 2}</Tag>}
             </span>
           )}
         </div>
       </td>
-      <td className={cn("px-2", grouped && "hidden")}>
+      <td className={cn("border-l border-border/60 px-2", grouped && "hidden")}>
         <ActionPill value={r.action} source={r.actionSource} hint={r.why} />
       </td>
-      <td className="px-2">
+      <td className={cn("px-2", grouped && "border-l border-border/60")}>
         <CategoryChip value={r.category} source={r.effective.category.source} />
       </td>
       <td className="px-2 text-xs">
         <SeverityMark value={r.severity} labelClassName="@max-3xl:hidden" />
       </td>
-      <td className="px-2">
-        <span className="flex items-center gap-1.5 text-muted-foreground">
-          {r.duplicateOf && (
-            <Mark hint="Possible duplicate; candidates are in the panel">
-              <Copy className="size-3.5" />
-            </Mark>
-          )}
-          {r.issue.comments > 0 && (
-            <Mark hint={`${r.issue.comments} comments on GitHub`}>
-              <span className="inline-flex items-center gap-0.5 text-2xs tabular-nums">
-                <MessageSquare className="size-3" />
-                {r.issue.comments}
-              </span>
-            </Mark>
-          )}
-        </span>
+      <td className="px-2 text-muted-foreground @max-3xl:hidden">
+        {r.duplicateOf && (
+          <Mark hint="Possible duplicate; candidates are in the panel">
+            <Copy className="size-3.5" />
+          </Mark>
+        )}
       </td>
       <td className="px-2">
         <span className="flex items-center gap-1.5">
@@ -291,6 +326,7 @@ function Row({
           )}
           <AvatarStack
             size="xs"
+            className="@max-3xl:hidden"
             people={viewers
               .filter((v) => v.user_id !== r.claimedBy)
               .map((v) => ({
@@ -302,7 +338,17 @@ function Row({
           />
         </span>
       </td>
-      <td className="pr-4 pl-2 text-right text-xs whitespace-nowrap text-muted-foreground tabular-nums">
+      <td className="border-l border-border/60 px-2 text-muted-foreground @max-3xl:hidden">
+        {r.issue.comments > 0 && (
+          <Mark hint={`${r.issue.comments} comments on GitHub`}>
+            <span className="inline-flex items-center gap-0.5 text-2xs tabular-nums">
+              <MessageSquare className="size-3" />
+              {r.issue.comments}
+            </span>
+          </Mark>
+        )}
+      </td>
+      <td className="pr-4 pl-2 text-right text-xs whitespace-nowrap text-muted-foreground tabular-nums @max-3xl:border-l @max-3xl:border-border/60">
         {agoShort(r.issue.updated_at, now)}
       </td>
     </tr>

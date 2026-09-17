@@ -6,7 +6,7 @@ import { ExternalLink, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ago, EFFORT_NAMES, pct, REVIEW_DECISION_NAMES, severityColor } from "../lib/format.ts";
 import { Avatar } from "./Avatar.tsx";
-import { Pill, ProbStrip, ReviewDecisionMark, StatusIcon } from "./Marks.tsx";
+import { ProbStrip, ReviewDecisionMark, SectionLabel, StatusIcon, Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { Textarea } from "./ui/textarea.tsx";
@@ -42,7 +42,10 @@ function effortName(value: string | null | undefined): string | null {
   return `${EFFORT_NAMES[Math.round(v * (REVIEW_EFFORT_LEVELS.length - 1))]} · ${pct(v)}`;
 }
 
-/** Split-view details for a pull request; mirrors IssuePanel. */
+/**
+ * Split-view details for a pull request; mirrors IssuePanel's two halves: the tinted Triage
+ * section (this app's suggestions, editable) and the plain "On GitHub" section (mirrored).
+ */
 export function PullPanel({
   pullId,
   questionsVersion,
@@ -107,51 +110,17 @@ export function PullPanel({
         : "model";
   const statusText = {
     classifying: "Classifying…",
-    unclassified: pull.reclassify ? "Queued" : "Not classified",
+    unclassified: pull.reclassify ? "Queued for the model" : "Not classified yet",
     human: "Confirmed by a person",
-    model: `Model · ${pct(eff.review_effort.confidence)} confident on effort`,
+    model: "Suggested by the model",
   }[status];
   const files = Array.isArray(pull.files_json) ? pull.files_json : [];
   const requested = Array.isArray(pull.requested_reviewers_json)
     ? pull.requested_reviewers_json
     : [];
   const labels = Array.isArray(pull.labels_json) ? pull.labels_json : [];
-  const activity = [
-    ...pull.reviews.map((r) => ({
-      key: r.id,
-      at: r.submitted_at,
-      node: (
-        <>
-          <span className="font-medium">{r.reviewer}</span>
-          <span className="text-muted-foreground">
-            {" "}
-            {REVIEW_STATE[r.state] ?? r.state.toLowerCase()}
-          </span>
-        </>
-      ),
-      name: r.reviewer,
-      color: "#8b8d98",
-      note: null as string | null,
-    })),
-    ...pull.feedback.map((f) => ({
-      key: f.id,
-      at: f.created_at,
-      node: (
-        <>
-          <span className="font-medium">{f.user?.name ?? f.user_id}</span>
-          <span className="text-muted-foreground"> set </span>
-          {KIND_LABEL[f.kind]?.toLowerCase() ?? f.kind}
-          <span className="text-muted-foreground"> to </span>
-          <span className="font-medium">
-            {f.kind === "review_effort" ? effortName(f.value) : f.value}
-          </span>
-        </>
-      ),
-      name: f.user?.name ?? "?",
-      color: f.user?.color ?? "#999",
-      note: f.note ?? null,
-    })),
-  ].sort((a, b) => b.at - a.at);
+  const reviews = [...pull.reviews].sort((a, b) => b.submitted_at - a.submitted_at);
+  const feedback = [...pull.feedback].sort((a, b) => b.created_at - a.created_at);
 
   return (
     <aside className="flex h-full min-h-0 flex-col border-l bg-background">
@@ -163,7 +132,7 @@ export function PullPanel({
           target="_blank"
           rel="noreferrer"
         >
-          GitHub <ExternalLink className="size-3" />
+          Open on GitHub <ExternalLink className="size-3" />
         </a>
         <span className="flex-1" />
         <Button variant="ghost" size="icon-xs" onClick={onClose} aria-label="Close (Esc)">
@@ -172,51 +141,30 @@ export function PullPanel({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <div className="flex flex-col gap-2 px-4 pt-4 pb-3">
+        <div className="flex flex-col gap-1.5 px-4 pt-4 pb-3">
           <h2 className="text-[0.9375rem] font-semibold text-balance">
-            {pull.draft && (
-              <Pill muted className="mr-2 align-middle">
-                draft
-              </Pill>
-            )}
+            {pull.draft && <Tag className="mr-2 align-middle">draft</Tag>}
             {pull.title}
           </h2>
           <p className="text-xs text-muted-foreground">
-            {pull.author} · {pull.state} · {pull.head_ref} → {pull.base_ref} ·{" "}
-            <span className="text-status-good">+{pull.additions}</span>{" "}
-            <span className="text-status-critical">−{pull.deletions}</span> in {pull.changed_files}{" "}
-            {pull.changed_files === 1 ? "file" : "files"} · opened {ago(pull.created_at, now)}
+            {pull.author} · {pull.state} · opened {ago(pull.created_at, now)}
             {pull.merged_at ? ` · merged ${ago(pull.merged_at, now)}` : ""}
           </p>
         </div>
 
-        <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Properties</h3>
-          <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-2 gap-y-1">
-            <dt className="text-xs text-muted-foreground">Status</dt>
-            <dd className="flex h-7 items-center gap-2 px-2">
-              <StatusIcon status={status} confidence={eff.review_effort.confidence} />
-              <span>{statusText}</span>
-            </dd>
-
-            <dt className="text-xs text-muted-foreground">Review state</dt>
-            <dd className="flex h-7 items-center gap-2 px-2">
-              <ReviewDecisionMark
-                decision={pull.review_decision}
-                draft={pull.draft}
-                hasReviews={pull.reviews.length > 0}
-              />
-              <span>
-                {pull.draft
-                  ? "Draft"
-                  : (REVIEW_DECISION_NAMES[pull.review_decision ?? ""] ??
-                    (pull.reviews.length > 0 ? "In review" : "Awaiting review"))}
-                {pull.mergeable === "CONFLICTING" && (
-                  <span className="text-status-serious"> · conflicts</span>
-                )}
+        <section className="border-y bg-primary/[0.04] px-4 py-3">
+          <SectionLabel
+            kind="triage"
+            trailing={
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <StatusIcon status={status} confidence={eff.review_effort.confidence} />
+                {statusText}
               </span>
-            </dd>
-
+            }
+          >
+            Triage
+          </SectionLabel>
+          <dl className="grid grid-cols-[6.5rem_1fr] items-center gap-x-2 gap-y-1">
             <dt className="text-xs text-muted-foreground">Effort</dt>
             <dd>
               <Select
@@ -274,33 +222,13 @@ export function PullPanel({
 
             {assigned && assigned.login !== reviewer && (
               <>
-                <dt className="text-xs text-muted-foreground">Suggested</dt>
+                <dt className="text-xs text-muted-foreground">Balanced</dt>
                 <dd className="px-2 text-sm">
                   {assigned.login}
                   <span className="text-xs text-muted-foreground">
                     {" "}
-                    · balanced for load; the model preferred {reviewer ?? "no one"}
+                    · spread for load; the model preferred {reviewer ?? "no one"}
                   </span>
-                </dd>
-              </>
-            )}
-
-            {requested.length > 0 && (
-              <>
-                <dt className="text-xs text-muted-foreground">Requested</dt>
-                <dd className="px-2 text-sm">{requested.join(", ")}</dd>
-              </>
-            )}
-
-            {labels.length > 0 && (
-              <>
-                <dt className="self-start pt-1.5 text-xs text-muted-foreground">Labels</dt>
-                <dd className="flex flex-wrap gap-1 px-2 py-1">
-                  {labels.map((l) => (
-                    <Pill key={l} muted>
-                      {l}
-                    </Pill>
-                  ))}
                 </dd>
               </>
             )}
@@ -310,16 +238,91 @@ export function PullPanel({
             className="mt-2 min-h-0 resize-none border-transparent bg-transparent px-2 shadow-none hover:bg-accent focus-visible:border-input focus-visible:bg-background dark:bg-transparent"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Add a note to your next answer…"
+            placeholder="Add a note to your next change…"
           />
         </section>
 
-        <section className="border-t px-4 py-3">
-          <h3 className="mb-2 flex items-center justify-between text-xs font-medium text-muted-foreground">
-            <span>Model</span>
-            <span className="font-normal">questions v{questionsVersion}</span>
+        <section className="px-4 py-3">
+          <SectionLabel kind="github">On GitHub</SectionLabel>
+          <dl className="grid grid-cols-[6.5rem_1fr] items-baseline gap-x-2 gap-y-1 text-sm">
+            <dt className="text-xs text-muted-foreground">Review state</dt>
+            <dd className="flex items-center gap-2">
+              <ReviewDecisionMark
+                decision={pull.review_decision}
+                draft={pull.draft}
+                hasReviews={pull.reviews.length > 0}
+              />
+              <span>
+                {pull.draft
+                  ? "Draft"
+                  : (REVIEW_DECISION_NAMES[pull.review_decision ?? ""] ??
+                    (pull.reviews.length > 0 ? "In review" : "Awaiting review"))}
+                {pull.mergeable === "CONFLICTING" && (
+                  <span className="text-status-serious"> · conflicts</span>
+                )}
+              </span>
+            </dd>
+            {requested.length > 0 && (
+              <>
+                <dt className="text-xs text-muted-foreground">Requested</dt>
+                <dd>{requested.join(", ")}</dd>
+              </>
+            )}
+            <dt className="text-xs text-muted-foreground">Change</dt>
+            <dd className="tabular-nums">
+              {pull.head_ref} → {pull.base_ref} ·{" "}
+              <span className="text-status-good">+{pull.additions}</span>{" "}
+              <span className="text-status-critical">−{pull.deletions}</span> in{" "}
+              {pull.changed_files} {pull.changed_files === 1 ? "file" : "files"} · {pull.comments}{" "}
+              comments
+            </dd>
+            {labels.length > 0 && (
+              <>
+                <dt className="self-start pt-1 text-xs text-muted-foreground">Labels</dt>
+                <dd className="flex flex-wrap gap-1">
+                  {labels.map((l) => (
+                    <Tag key={l}>{l}</Tag>
+                  ))}
+                </dd>
+              </>
+            )}
+          </dl>
+          <div className="mt-3 max-h-96 overflow-auto text-sm leading-5 whitespace-pre-wrap text-foreground/90">
+            {pull.body || <span className="text-muted-foreground">No description.</span>}
+          </div>
+          <h3 className="mt-3 mb-1 text-xs font-medium text-muted-foreground">
+            Files
+            {files.length < pull.changed_files ? ` (${files.length} of ${pull.changed_files})` : ""}
           </h3>
-          <dl className="grid grid-cols-[6.5rem_1fr] gap-x-2 gap-y-3">
+          {files.length === 0 && <p className="text-xs text-muted-foreground">No file list.</p>}
+          <ul role="list" className="max-h-48 overflow-auto font-mono text-xs leading-5">
+            {files.map((f) => (
+              <li key={f} className="truncate text-foreground/80" title={f}>
+                {f}
+              </li>
+            ))}
+          </ul>
+          <h3 className="mt-3 mb-1 text-xs font-medium text-muted-foreground">Reviews</h3>
+          {reviews.length === 0 && <p className="text-xs text-muted-foreground">No reviews yet.</p>}
+          <ul role="list" className="flex flex-col gap-1">
+            {reviews.map((r) => (
+              <li key={r.id} className="text-xs">
+                <span className="font-medium">{r.reviewer}</span>
+                <span className="text-muted-foreground">
+                  {" "}
+                  {REVIEW_STATE[r.state] ?? r.state.toLowerCase()} · {ago(r.submitted_at, now)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+
+        <details className="group border-t px-4 py-3">
+          <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-medium text-muted-foreground">
+            <span>What the model saw</span>
+            <span className="font-normal">questions v{questionsVersion}</span>
+          </summary>
+          <dl className="mt-3 grid grid-cols-[6.5rem_1fr] gap-x-2 gap-y-3">
             {PULL_KINDS.map((k) => {
               const f = eff[k];
               const show = (v: string | null | undefined) =>
@@ -355,43 +358,27 @@ export function PullPanel({
               );
             })}
           </dl>
-        </section>
+        </details>
 
         <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">
-            Files
-            {files.length < pull.changed_files ? ` (${files.length} of ${pull.changed_files})` : ""}
-          </h3>
-          {files.length === 0 && <p className="text-xs text-muted-foreground">No file list.</p>}
-          <ul role="list" className="max-h-48 overflow-auto font-mono text-xs leading-5">
-            {files.map((f) => (
-              <li key={f} className="truncate text-foreground/80" title={f}>
-                {f}
-              </li>
-            ))}
-          </ul>
-        </section>
-
-        <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Description</h3>
-          <div className="max-h-96 overflow-auto text-sm leading-5 whitespace-pre-wrap text-foreground/90">
-            {pull.body || <span className="text-muted-foreground">No description.</span>}
-          </div>
-        </section>
-
-        <section className="border-t px-4 py-3">
-          <h3 className="mb-2 text-xs font-medium text-muted-foreground">Activity</h3>
-          {activity.length === 0 && (
-            <p className="text-xs text-muted-foreground">No reviews or feedback yet.</p>
+          <SectionLabel kind="triage">Triage activity</SectionLabel>
+          {feedback.length === 0 && (
+            <p className="text-xs text-muted-foreground">Nobody has touched this yet.</p>
           )}
           <ul role="list" className="flex flex-col gap-2">
-            {activity.map((a) => (
-              <li key={a.key} className="flex items-start gap-2 text-xs">
-                <Avatar name={a.name} color={a.color} size="xs" />
+            {feedback.map((f) => (
+              <li key={f.id} className="flex items-start gap-2 text-xs">
+                <Avatar name={f.user?.name ?? "?"} color={f.user?.color ?? "#999"} size="xs" />
                 <div className="min-w-0">
-                  {a.node}
-                  <span className="text-muted-foreground"> · {ago(a.at, now)}</span>
-                  {a.note && <div className="text-muted-foreground">“{a.note}”</div>}
+                  <span className="font-medium">{f.user?.name ?? f.user_id}</span>
+                  <span className="text-muted-foreground"> set </span>
+                  {KIND_LABEL[f.kind]?.toLowerCase() ?? f.kind}
+                  <span className="text-muted-foreground"> to </span>
+                  <span className="font-medium">
+                    {f.kind === "review_effort" ? effortName(f.value) : f.value}
+                  </span>
+                  <span className="text-muted-foreground"> · {ago(f.created_at, now)}</span>
+                  {f.note && <div className="text-muted-foreground">“{f.note}”</div>}
                 </div>
               </li>
             ))}
