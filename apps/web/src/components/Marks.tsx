@@ -63,9 +63,9 @@ export function ConfidenceRing({
 export type IssueStatus = "unclassified" | "classifying" | "model" | "human" | "review";
 
 /**
- * Where the app's judgment on this row stands. Four distinct shapes, none of them a ring:
- * a spark for a model suggestion, a check for a person's confirmation, a warning when the
- * model was unsure, a dashed circle when nothing has been asked yet.
+ * Where the app's judgment on this row stands. One quiet glyph per state, none of them a
+ * ring: a spark for a model suggestion, a check for a person's confirmation, a warning when
+ * the model was unsure, a dashed circle when nothing has been asked yet.
  */
 export function StatusIcon({
   status,
@@ -93,12 +93,8 @@ export function StatusIcon({
           {status === "classifying" && (
             <span className="size-3.5 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
           )}
-          {status === "model" && <Sparkles className="size-3.5 text-primary/70" />}
-          {status === "human" && (
-            <span className="inline-flex size-3.5 items-center justify-center rounded-full bg-status-good text-white">
-              <Check className="size-2.5" strokeWidth={3} />
-            </span>
-          )}
+          {status === "model" && <Sparkles className="size-3.5 text-muted-foreground" />}
+          {status === "human" && <Check className="size-3.5 text-status-good" strokeWidth={2.5} />}
           {status === "review" && <CircleAlert className="size-3.5 text-status-warning" />}
         </span>
       </TooltipTrigger>
@@ -179,9 +175,9 @@ export function SeverityMark({
 }
 
 /**
- * Two shapes with two meanings. A judgment pill (round, hairline border, colored dot) is
- * something this app decided or a person confirmed. A tag (square corners, filled, no dot)
- * is a fact mirrored from GitHub, such as a label.
+ * Two shapes with two meanings, used everywhere. A judgment pill (round, hairline border,
+ * colored dot) is something this app decided or a person confirmed. A tag (square corners,
+ * filled, no dot) is a fact mirrored from GitHub, such as a label.
  */
 export function Pill({
   color,
@@ -370,15 +366,7 @@ export function ReviewDecisionMark({
   const [label, node] = draft
     ? ["Draft", <CircleDashed key="d" className="size-3.5 text-muted-foreground" />]
     : decision === "APPROVED"
-      ? [
-          "Approved",
-          <span
-            key="a"
-            className="inline-flex size-3.5 items-center justify-center rounded-full bg-status-good text-white"
-          >
-            <Check className="size-2.5" strokeWidth={3} />
-          </span>,
-        ]
+      ? ["Approved", <Check key="a" className="size-3.5 text-status-good" strokeWidth={2.5} />]
       : decision === "CHANGES_REQUESTED"
         ? ["Changes requested", <CircleAlert key="c" className="size-3.5 text-status-serious" />]
         : hasReviews
@@ -397,8 +385,8 @@ export function ReviewDecisionMark({
 }
 
 /**
- * Section eyebrow for the detail panels: what this app decided (triage) versus what is
- * mirrored from GitHub. The triage section also sits on a tinted surface.
+ * Section heading for the detail panels, in the same style as every other section heading.
+ * The icon says whose information follows: this app's judgments, or GitHub's record.
  */
 export function SectionLabel({
   kind,
@@ -410,54 +398,14 @@ export function SectionLabel({
   trailing?: React.ReactNode;
 }) {
   return (
-    <div className="mb-2 flex items-center gap-1.5 text-2xs font-medium tracking-wider uppercase">
+    <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
       {kind === "triage" ? (
-        <Sparkles className="size-3 text-primary" />
+        <Sparkles className="size-3.5 shrink-0" />
       ) : (
-        <GitBranch className="size-3 text-muted-foreground" />
+        <GitBranch className="size-3.5 shrink-0" />
       )}
-      <span className={kind === "triage" ? "text-primary" : "text-muted-foreground"}>
-        {children}
-      </span>
-      {trailing && (
-        <span className="ml-auto font-normal normal-case tracking-normal">{trailing}</span>
-      )}
+      <h3>{children}</h3>
+      {trailing && <span className="ml-auto font-normal">{trailing}</span>}
     </div>
-  );
-}
-
-/** Column-group header cell: the same triage/GitHub split, over a table. */
-export function GroupHead({
-  kind,
-  colSpan,
-  className,
-}: {
-  kind: "triage" | "github" | "none";
-  colSpan: number;
-  className?: string;
-}) {
-  return (
-    <th
-      colSpan={colSpan}
-      className={cn(
-        "sticky top-8 z-10 h-5 bg-background px-2 text-left text-2xs font-medium tracking-wider uppercase",
-        kind === "triage" && "text-primary/80",
-        kind === "github" && "text-muted-foreground/80",
-        className,
-      )}
-    >
-      {kind === "triage" && (
-        <span className="inline-flex items-center gap-1">
-          <Sparkles className="size-2.5" />
-          Triage
-        </span>
-      )}
-      {kind === "github" && (
-        <span className="inline-flex items-center gap-1">
-          <GitBranch className="size-2.5" />
-          GitHub
-        </span>
-      )}
-    </th>
   );
 }

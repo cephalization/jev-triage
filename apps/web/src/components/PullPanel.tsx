@@ -152,7 +152,7 @@ export function PullPanel({
           </p>
         </div>
 
-        <section className="border-y bg-primary/[0.04] px-4 py-3">
+        <section className="border-y bg-muted/40 px-4 py-3">
           <SectionLabel
             kind="triage"
             trailing={
