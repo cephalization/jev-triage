@@ -34,6 +34,9 @@ export const queries = defineQueries({
         : zql.invite.where("login", "=", ""),
     ),
   },
+  providers: {
+    all: defineQuery(() => zql.provider.orderBy("label", "asc")),
+  },
   repos: {
     all: defineQuery(() => zql.repo.orderBy("id", "asc").related("workerState")),
     byId: defineQuery(z.string(), ({ args: id }) =>

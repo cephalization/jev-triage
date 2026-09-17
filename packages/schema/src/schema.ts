@@ -46,6 +46,11 @@ export type PullKind = (typeof PULL_KINDS)[number];
 export const CATEGORIES = ["bug", "feature", "question", "docs", "chore", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
 
+/** Model providers an admin can configure for guided reviews; keys live server-side only. */
+export const PROVIDER_KINDS = ["anthropic", "openai", "openrouter", "openai-compatible"] as const;
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
+export type ProviderModel = { id: string; label: string; enabled: boolean };
+
 /** Triage queue state of an issue. `done` leaves the queue; claiming names who is on it. */
 export const TRIAGE_STATUSES = ["open", "done"] as const;
 export type TriageStatus = (typeof TRIAGE_STATUSES)[number];
@@ -109,7 +114,24 @@ const repo = table("repo")
     input_tokens_used: number(),
     output_tokens_used: number(),
     paused: boolean(),
+    review_provider_id: string().optional(),
+    review_model: string().optional(),
     created_at: number(),
+  })
+  .primaryKey("id");
+
+/** Replicated half of a provider: everything but the key, which stays in a private schema. */
+const provider = table("provider")
+  .columns({
+    id: string(),
+    kind: string(),
+    label: string(),
+    base_url: string(),
+    key_hint: string().optional(),
+    models_json: json<ProviderModel[]>(),
+    created_by: string().optional(),
+    created_at: number(),
+    updated_at: number(),
   })
   .primaryKey("id");
 
@@ -367,6 +389,7 @@ export const schema = createSchema({
     user,
     invite,
     repo,
+    provider,
     label,
     issue,
     issueLabel,

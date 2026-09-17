@@ -14,8 +14,8 @@ Nothing is written back to GitHub in any phase.
 
 | Phase | Deliverable                                                               | Status   |
 | ----- | ------------------------------------------------------------------------- | -------- |
-| 1     | Real authentication: GitHub sign-in, admin from env, allowlist invites    | building |
-| 2     | Providers and models: shared, server-side, keys encrypted, chosen per run | next     |
+| 1     | Real authentication: GitHub sign-in, admin from env, allowlist invites    | done     |
+| 2     | Providers and models: shared, server-side, keys encrypted, chosen per run | building |
 | 3     | Review environment: fetch the PR, run a headless agent, store the result  |          |
 | 4     | jev pass over the diff: per-file role, risk and attention, seeds grouping |          |
 | 5     | Review UI: step rail, per-step diffs, shared review, personal progress    |          |
@@ -69,14 +69,20 @@ existing dev name login, which is removed.
 Shared configuration, edited in System by admins, readable by everyone, keys never leaving the
 server.
 
-- `provider(id, kind, label, base_url, key_ciphertext, created_by, created_at)`. Kinds to start:
-  `anthropic`, `openai`, `openrouter`, and `openai-compatible` (custom base URL). Keys are
-  encrypted at rest with `CONFIG_SECRET` from env and shown masked; the UI only ever sends a
-  new key or nothing.
-- `model(provider_id, name, label, enabled)` listed per provider; either a curated list per kind
-  or fetched from the provider's models endpoint where one exists.
-- A per-repo default provider and model, plus a per-run override chosen when generating.
-- The health endpoint reports which providers are configured so the UI can hide what is not.
+- `provider(id, kind, label, base_url, key_hint, models_json, …)` is replicated like any other
+  row; the key is sealed with AES-256-GCM under `CONFIG_SECRET` into `private.provider_key`, a
+  schema Zero does not publish, so it never reaches zero-cache or a browser. Kinds:
+  `anthropic`, `openai`, `openrouter`, `openai-compatible` (custom base URL).
+- Provider rows are edited through admin-only mutators; the key goes through
+  `PUT /api/providers/:id/key` and is shown only as its last characters. Removing a provider
+  drops the key too.
+- Models are fetched from the provider's `/models` endpoint with the stored key
+  (`POST /api/providers/:id/models`) and kept in `models_json` with an enabled flag, so admins
+  can hide the long tail. They can also be typed by hand for proxies that list nothing.
+- A per-repo default provider and model (`repo.review_provider_id`, `repo.review_model`) that
+  anyone can set from System → Guided reviews; a run may override it.
+- `resolveProvider(id)` on the server hands a runner the base URL, the env var its CLI expects
+  and the plaintext key, and nothing else ever sees it.
 
 ## Phase 3: review environment
 

@@ -7,6 +7,8 @@ import { useEffect, useMemo, useState } from "react";
 import { costOf, pokeWorker, usePrices } from "../lib/api.ts";
 import type { Session } from "../lib/auth.ts";
 import { People } from "./People.tsx";
+import { Providers } from "./Providers.tsx";
+import { ReviewDefaults } from "./ReviewDefaults.tsx";
 import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
 import { Columns, Legend } from "./Charts.tsx";
@@ -174,6 +176,24 @@ export function SystemPanel({
           description="Who can sign in. Invite a GitHub login and choose a role; removing an invite stops the next sign-in."
         >
           <People session={session} adminLogins={adminLogins} now={now} />
+        </Section>
+      )}
+
+      {session.user.role === "admin" && (
+        <Section
+          title="Providers"
+          description="Model providers guided reviews can run on. Shared by everyone; keys are sealed on the server and never shown again."
+        >
+          <Providers session={session} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Guided reviews"
+          description="The provider and model used when someone generates a review of a pull request in this repo. Anyone can change it; a run can override it."
+        >
+          <ReviewDefaults repo={repo} />
         </Section>
       )}
 

@@ -14,6 +14,13 @@ import {
   type GithubUser,
 } from "./github/account.ts";
 import { isSyncing, syncRepo } from "./github/sync.ts";
+import { isKind, KINDS, listModels } from "./providers/catalog.ts";
+import {
+  clearProviderKey,
+  getProvider,
+  loadProviderKey,
+  setProviderKey,
+} from "./providers/store.ts";
 import { ClassifierWorker } from "./worker/classifier.ts";
 import { TypeSafeSystemOne } from "./worker/typesafe.ts";
 import { zeroRoutes } from "./zero/routes.ts";
@@ -137,6 +144,47 @@ app.post("/api/auth/token", async (c) => {
   return c.json({ token: result.token, user: result.user });
 });
 
+// ---- Providers: the key never travels through Zero, so it has its own routes -------------
+
+async function requireAdmin(c: { req: { raw: Request } }): Promise<ZeroContext | null> {
+  const ctx = await contextFromRequest(c.req.raw);
+  return ctx?.role === "admin" ? ctx : null;
+}
+
+/** Kinds, labels and default base URLs, so the UI never hardcodes provider facts. */
+app.get("/api/providers/kinds", (c) => c.json({ kinds: KINDS }));
+
+const keyBody = z.object({ key: z.string().trim().min(1).max(500) });
+app.put("/api/providers/:id/key", async (c) => {
+  if (!(await requireAdmin(c))) return c.json({ error: "admins only" }, 403);
+  const id = c.req.param("id");
+  if (!(await getProvider(id))) return c.json({ error: "no such provider" }, 404);
+  const parsed = keyBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "key required" }, 400);
+  const keyHint = await setProviderKey(id, parsed.data.key);
+  return c.json({ ok: true, keyHint });
+});
+
+app.delete("/api/providers/:id/key", async (c) => {
+  if (!(await requireAdmin(c))) return c.json({ error: "admins only" }, 403);
+  await clearProviderKey(c.req.param("id"));
+  return c.json({ ok: true });
+});
+
+/** Ask the provider for its models with the stored key; the UI merges the answer into the row. */
+app.post("/api/providers/:id/models", async (c) => {
+  if (!(await requireAdmin(c))) return c.json({ error: "admins only" }, 403);
+  const p = await getProvider(c.req.param("id"));
+  if (!p || !isKind(p.kind)) return c.json({ error: "no such provider" }, 404);
+  const key = await loadProviderKey(p.id);
+  if (!key) return c.json({ error: "set a key first" }, 400);
+  try {
+    return c.json({ models: await listModels(p.kind, p.base_url, key) });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : "model list failed" }, 502);
+  }
+});
+
 /** Which logins the server treats as admins, for the People screen. */
 app.get("/api/auth/admins", async (c) => {
   const ctx = await contextFromRequest(c.req.raw);
@@ -144,10 +192,16 @@ app.get("/api/auth/admins", async (c) => {
   return c.json({ logins: env.adminLogins });
 });
 
-/** Lets the client check a stored token before trusting it (secrets rotate, tokens expire). */
+/**
+ * Lets the client check a stored token before trusting it (secrets rotate, tokens expire, and a
+ * user row can be removed under a live session, after which every write would fail on its
+ * foreign key). A missing row answers 401 so the client signs out cleanly.
+ */
 app.get("/api/auth/me", async (c) => {
   const ctx = await contextFromRequest(c.req.raw);
   if (!ctx) return c.json({ error: "invalid or expired token" }, 401);
+  const [row] = await sql<{ id: string }[]>`select id from "user" where id = ${ctx.userID}`;
+  if (!row) return c.json({ error: "account no longer exists; sign in again" }, 401);
   return c.json({ user: ctx });
 });
 

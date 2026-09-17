@@ -1,6 +1,13 @@
 import { defineMutator, defineMutators, type Transaction } from "@rocicorp/zero";
 import { z } from "zod";
-import { CLASSIFICATION_KINDS, PULL_KINDS, ROLES, TRIAGE_STATUSES, zql } from "./schema.ts";
+import {
+  CLASSIFICATION_KINDS,
+  PROVIDER_KINDS,
+  PULL_KINDS,
+  ROLES,
+  TRIAGE_STATUSES,
+  zql,
+} from "./schema.ts";
 
 /**
  * Client-safe mutators. They run optimistically in the browser and again on the
@@ -49,7 +56,27 @@ export const repoSetKnobsArgs = z.object({
   syncLimit: z.number().int().min(1).max(5000).optional(),
   pullLimit: z.number().int().min(1).max(2000).optional(),
   pullHistoryLimit: z.number().int().min(0).max(2000).optional(),
+  /** Default provider and model for guided reviews; null clears. */
+  reviewProviderId: z.string().nullable().optional(),
+  reviewModel: z.string().max(200).nullable().optional(),
 });
+
+const modelSchema = z.object({
+  id: z.string().min(1).max(200),
+  label: z.string().min(1).max(200),
+  enabled: z.boolean(),
+});
+
+/** Everything about a provider except its key, which goes through the API. */
+export const providerSaveArgs = z.object({
+  id: z.string().min(1).max(64),
+  kind: z.enum(PROVIDER_KINDS),
+  label: z.string().trim().min(1).max(60),
+  baseUrl: z.string().trim().url().max(300),
+  models: z.array(modelSchema).max(500).optional(),
+});
+
+export const providerRemoveArgs = z.object({ id: z.string().min(1) });
 
 export const repoRecalculateArgs = z.object({
   repoId: z.string(),
@@ -134,6 +161,29 @@ export const mutators = defineMutators({
       if (!args.reclassify) return;
       if (args.issueId) await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
       if (args.pullId) await tx.mutate.pull.update({ id: args.pullId, reclassify: true });
+    }),
+  },
+  provider: {
+    save: defineMutator(providerSaveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can configure providers");
+      const existing = await tx.run(zql.provider.where("id", args.id).one());
+      const now = Date.now();
+      await tx.mutate.provider.upsert({
+        id: args.id,
+        kind: args.kind,
+        label: args.label,
+        base_url: args.baseUrl.replace(/\/+$/, ""),
+        key_hint: existing?.key_hint ?? null,
+        models_json: args.models ?? existing?.models_json ?? [],
+        created_by: existing?.created_by ?? ctx.userID,
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      });
+    }),
+    /** The server override also deletes the sealed key; the cascade covers the SQL side too. */
+    remove: defineMutator(providerRemoveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can remove providers");
+      await tx.mutate.provider.delete({ id: args.id });
     }),
   },
   invite: {
@@ -237,6 +287,10 @@ export const mutators = defineMutators({
         ...(args.pullHistoryLimit !== undefined
           ? { pull_history_limit: args.pullHistoryLimit }
           : {}),
+        ...(args.reviewProviderId !== undefined
+          ? { review_provider_id: args.reviewProviderId }
+          : {}),
+        ...(args.reviewModel !== undefined ? { review_model: args.reviewModel } : {}),
       });
     }),
     recalculate: defineMutator(repoRecalculateArgs, async ({ tx, ctx, args }) => {

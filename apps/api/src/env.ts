@@ -21,6 +21,8 @@ export const env = {
   port: Number(process.env.API_PORT ?? 3939),
   upstreamDb: required("ZERO_UPSTREAM_DB"),
   authSecret: required("AUTH_SECRET"),
+  /** Seals provider API keys at rest. Falls back to AUTH_SECRET so a fresh clone still works. */
+  configSecret: process.env.CONFIG_SECRET?.trim() || required("AUTH_SECRET"),
   typesafeKey: process.env.TYPESAFE_API_KEY?.trim() || null,
   typesafeModel: process.env.TYPESAFE_DEFAULT_MODEL?.trim() || undefined,
   /** Server token for sync. Sign-in uses each person's own GitHub identity, not this. */

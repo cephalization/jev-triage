@@ -45,6 +45,26 @@ export function parseRepoSpec(spec: string): { owner: string; name: string } | n
   return m ? { owner: m[1]!, name: m[2]! } : null;
 }
 
+/** Authenticated JSON call to the API; throws with the server's message on failure. */
+export async function apiJson<T>(
+  token: string,
+  path: string,
+  init: { method?: string; body?: unknown } = {},
+): Promise<T> {
+  const res = await fetch(path, {
+    method: init.method ?? "GET",
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
+    },
+    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  if (!res.ok)
+    throw new Error(data.error ?? `${init.method ?? "GET"} ${path} failed (${res.status})`);
+  return data;
+}
+
 export function pokeWorker(repoId: string) {
   return fetch("/api/classify/poke", {
     method: "POST",

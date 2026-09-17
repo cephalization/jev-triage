@@ -94,6 +94,7 @@ Everything lives in `.env`, which is never committed. See `.env.example` for the
 | `TYPESAFE_API_KEY`               | Classification. Without it the app syncs but never classifies. |
 | `GITHUB_TOKEN`                   | Server token for pull request sync and higher rate limits.     |
 | `AUTH_SECRET`                    | Signs session tokens.                                          |
+| `CONFIG_SECRET`                  | Seals provider API keys at rest. Defaults to `AUTH_SECRET`.    |
 | `ADMIN_GITHUB_LOGINS`            | Comma-separated GitHub logins that are always admins.          |
 | `GITHUB_CLIENT_ID` / `_SECRET`   | The GitHub OAuth app for "Continue with GitHub".               |
 | `APP_URL`                        | Where the browser reaches the app; builds the OAuth callback.  |

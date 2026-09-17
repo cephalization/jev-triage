@@ -1,5 +1,6 @@
 import { defineMutator, defineMutators } from "@rocicorp/zero";
-import { feedbackSetArgs, mutators, repoRecalculateArgs } from "@triage/schema";
+import { feedbackSetArgs, mutators, providerRemoveArgs, repoRecalculateArgs } from "@triage/schema";
+import { clearProviderKey } from "../providers/store.ts";
 
 /**
  * Server-side overrides of the shared mutators. They run the same logic, then append
@@ -17,6 +18,13 @@ export function createServerMutators(
         // A confirmation (reclassify=false) changes nothing the model should redo.
         if (args.reclassify)
           asyncTasks.push(async () => poke(args.repoId, `feedback:${args.kind}`));
+      }),
+    },
+    provider: {
+      remove: defineMutator(providerRemoveArgs, async ({ tx, ctx, args }) => {
+        await mutators.provider.remove.fn({ tx, ctx, args });
+        // The sealed key lives outside Zero; drop it once the row deletion has committed.
+        asyncTasks.push(() => clearProviderKey(args.id));
       }),
     },
     repo: {
