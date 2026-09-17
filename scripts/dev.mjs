@@ -1,7 +1,7 @@
 // Starts Postgres (docker compose), runs migrations, then api + zero-cache + web together.
-// Usage: pnpm dev   (Ctrl-C stops everything). Env comes from the root .env.
+// Usage: vp run dev   (Ctrl-C stops everything). Env comes from the root .env.
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const root = new URL("..", import.meta.url).pathname;
 
@@ -19,6 +19,18 @@ function loadEnv(path) {
     out[m[1]] = m[2].replace(/^"(.*)"$/, "$1");
   }
   return out;
+}
+
+const major = Number(process.versions.node.split(".")[0]);
+if (major < 24) {
+  console.error(`[dev] Node 24 or newer is required (found ${process.versions.node}).`);
+  process.exit(1);
+}
+if (!existsSync(`${root}.env`)) {
+  console.error(
+    "[dev] No .env found. Run `cp .env.example .env`, set TYPESAFE_API_KEY, then `vp run dev`.",
+  );
+  process.exit(1);
 }
 
 const env = { ...loadEnv(`${root}.env`), ...process.env };

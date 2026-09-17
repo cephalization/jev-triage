@@ -1,104 +1,103 @@
 # typeful-triage
 
-Multiplayer GitHub triage dashboard. Issues and pull requests sync from GitHub into Postgres,
-Rocicorp Zero replicates them to every browser, a Hono API classifies them with TypeSafe System
-One, and users correct the model; corrections persist and feed the next recalculation.
+A multiplayer triage dashboard for public GitHub repositories. Issues and pull requests sync
+into Postgres, [Rocicorp Zero](https://zero.rocicorp.dev) replicates them live to every
+browser, and a [TypeSafe System One](https://docs.typesafe.ai) model answers a fixed set of
+typed questions about each one: what kind of issue it is, how severe, how urgent, whether it
+duplicates another, and above all **what a maintainer should do next**. People confirm or
+correct those answers, claim issues, and mark them done; every correction is kept and shown
+to the model on later runs.
 
-See `docs/BRIEF.md` for the plan and `CLAUDE.md` for working rules.
+Nothing is written back to GitHub. The app is a shared view over a repository, not a bot.
 
-## Run it
+## What you see
+
+- **Triage** groups open issues by the suggested next step: ask the author, reply with an
+  answer, investigate, needs a decision, accept into the backlog, close, or waiting. Marking an
+  issue done clears it from the queue. Claiming it shows who is on it.
+- **Unsure** lists issues the model was not confident about, or where a person disagreed with
+  it, least confident first.
+- **Pull requests** are ordered by attention (approved and mergeable first, drafts last), with
+  an estimated review effort and a suggested reviewer drawn from the repository's review history
+  and balanced across people.
+- **Repo** shows maintainer-facing health: queue size, who has what, next steps, categories,
+  severity, reviewer load.
+- **System** holds the operator side: token spend, cost controls, worker state, and model
+  calibration against human feedback.
+
+Keyboard: `j`/`k` or arrows move, `Esc` closes the panel, `a` accepts the suggestion and marks
+the issue done, `c` claims, `x` toggles done, `1`–`6` set the category, `/` searches,
+`g` then `t`/`u`/`p`/`r`/`s` switches views.
+
+## Requirements
+
+- [Vite+](https://viteplus.dev): `curl -fsSL https://vite.plus | bash` (Windows:
+  `irm https://vite.plus/ps1 | iex`). Node and the package manager are pinned in `package.json`
+  and fetched by Vite+ on first use, so nothing else needs to be installed.
+- A Docker-compatible CLI that provides `docker compose` (Docker Desktop, OrbStack, Podman with
+  the docker shim), for Postgres.
+- A TypeSafe API key ([docs.typesafe.ai](https://docs.typesafe.ai)).
+- Optionally a GitHub token, for pull request sync and higher API rate limits.
+
+## Quick start
 
 ```sh
-cp .env.example .env          # add TYPESAFE_API_KEY and (optionally) GITHUB_TOKEN
+git clone https://github.com/cephalization/jev-triage
+cd jev-triage
+cp .env.example .env     # set TYPESAFE_API_KEY, and GITHUB_TOKEN if you want pull requests
 vp install
-pnpm dev                      # postgres (docker) + migrations + api + zero-cache + web
+vp run dev               # postgres (docker) + migrations + api + zero-cache + web
 ```
 
-Open http://localhost:5173, sign in with any name, paste `owner/name`, press Add. Keys: j/k move,
-Esc closes the panel, a accepts the suggestion and marks the issue done, c claims it, x marks it
-done, 1–6 set the category, / focuses search, g then t/u/p/r/s switches views.
+Open http://localhost:5173, sign in with any name (development auth), open the repository
+switcher and add `owner/name`. Issues sync newest first and get their suggestions within a few
+seconds. Open the app in a second window under another name to see presence and claims.
+
+The Postgres container listens on port 5433 so it does not clash with a local install. Change
+`ZERO_UPSTREAM_DB` in `.env` and the port mapping in `docker-compose.yml` together if you need
+another.
+
+## Configuration
+
+Everything lives in `.env`, which is never committed. See `.env.example` for the full list.
+
+| Variable                         | Purpose                                                        |
+| -------------------------------- | -------------------------------------------------------------- |
+| `TYPESAFE_API_KEY`               | Classification. Without it the app syncs but never classifies. |
+| `GITHUB_TOKEN`                   | Pull request sync (GraphQL) and higher rate limits. Optional.  |
+| `AUTH_SECRET`                    | Signs the development login tokens.                            |
+| `TYPESAFE_PRICE_INPUT_PER_MTOK`  | Price per million input tokens, shown as spend. Preset.        |
+| `TYPESAFE_PRICE_OUTPUT_PER_MTOK` | Price per million output tokens. Preset.                       |
+
+Per-repository knobs live in the System view and are shared by everyone: pause, batch size,
+cadence, sync caps, and a token budget that stops the worker when reached. Defaults are
+deliberately small (100 issues) so trying a large repository costs cents, not dollars.
 
 ## Layout
 
-| Path              | What                                                                                      |
-| ----------------- | ----------------------------------------------------------------------------------------- |
-| `apps/web`        | Vite+ React dashboard (shadcn/ui, Zero client)                                            |
-| `apps/api`        | Hono: `/api/query`, `/api/mutate`, `/api/sync`, `/api/auth/dev`, classifier worker        |
-| `packages/schema` | Zero schema, client-safe mutators, synced queries, effective-value helper                 |
-| `packages/triage` | TypeSafe question builders + pure `decide()` + priority + calibration, all tested offline |
-| `db/migrations`   | Plain SQL, applied by `pnpm --filter @triage/api migrate`                                 |
+| Path              | What                                                                           |
+| ----------------- | ------------------------------------------------------------------------------ |
+| `apps/web`        | React dashboard (Vite+, shadcn/ui, Zero client)                                |
+| `apps/api`        | Hono server: Zero query and mutate endpoints, GitHub sync, classifier worker   |
+| `packages/schema` | Zero schema, client-safe mutators, synced queries, effective-value helper      |
+| `packages/triage` | TypeSafe question builders, the pure `decide()` policy, priority, calibration  |
+| `db/migrations`   | Plain SQL, applied in order by `vp run migrate` (and on every `vp run dev`)    |
+| `docs`            | `ARCHITECTURE.md`: data model, flows, question design, and the rules behind it |
 
-## Checks
+## Development
 
 ```sh
-vp check --fix      # fmt + lint + types
-vp run -r test      # unit tests in every package
+vp check --fix   # format, lint, type-check
+vp run -r test   # unit tests in every package
+vp run migrate   # apply new SQL migrations to the running database
 ```
 
-## How the pieces fit
+The API restarts on every save; the web app hot-reloads. Question builders and policy are pure
+and tested with canned answers, so no network is needed for the test suite.
 
-- **Sync** (`POST /api/sync {owner, name, paused?, limit?}`, answers 202 immediately): walks
-  `issues.listForRepo` sorted by `updated` descending, one page per transaction, so the most
-  recently touched issues land and get classified first. Recent phase = last year (or down to the
-  previous high-water mark `repo.sync_cursor` on a re-sync); history phase = older pages, one every
-  4 s, resumable via `repo.history_cursor`. `repo.sync_limit` (default 100, Settings → Sync cap)
-  caps _new_ issues; updates to stored issues always apply. Progress is on the repo row
-  (`sync_phase`, `sync_fetched`, `sync_pages`, `sync_rate_remaining`, `sync_message`).
-- **Pull requests** (`apps/api/src/github/pulls.ts`, needs `GITHUB_TOKEN`): once the recent issue
-  phase ends, one GraphQL walk fetches open pulls (files, reviews, requested reviewers; cap
-  `repo.pull_limit`, default 200) and a second, slower walk fetches merged/closed pulls
-  (`repo.pull_history_limit`, default 300). After every history page the `reviewer` roster is
-  rebuilt in pure code (`packages/triage/src/reviewers.ts`): reviews, approvals, directories
-  reviewed, median first-response time, open load. Bots and AI review accounts are excluded.
-- **Classify** (`apps/api/src/worker`): one `Scheduler` per repo. A poke while a request is in
-  flight only sets `dirty` (counted as a dropped trigger); pokes inside the 300 ms collect window
-  share one run (coalesced); a finished batch re-runs after `cadence_ms` only while issues remain.
-  Each batch is one TypeSafe request: shared state (repo, area labels, up to 20 human-labelled
-  examples with their category, area and next step, ≤ 1500-char excerpts) × 6–7 questions per
-  issue (questions v2): **category**, **area**, **severity**, **urgency**, **duplicate** (rerank
-  over code-found candidates), **action** (the single next step a maintainer should take: ask the
-  author, answer, investigate, decide, accept, close, or wait) and **missing** (what a reply should
-  ask for, asked speculatively for every issue). Usage is written to `run` and logged.
-  Open pull requests follow in batches of ≤ 8 with two questions each: **review effort** (a Score
-  over four rubric levels, judged from files, diff shape and description) and **reviewer** (a
-  Choice over ≤ 5 candidates the code shortlisted by directory overlap, recency and volume, plus
-  `none`). The model judges expertise only; load balancing runs in the browser
-  (`assignReviewers`) over the stored probabilities, so it changes no inference.
-- **Feedback** (`mutators.feedback.set`): append-only rows; the effective value of a field is the
-  latest human row, else the latest model row at the current `questions_version`. The server
-  override of the mutator pokes the worker; the model's rows are refreshed, never overwritten.
-  A confirmation (`reclassify: false`, what "Looks right" sends) records the feedback without
-  re-asking.
-- **Triage queue** (`triage` table, `mutators.triage.*`): the Triage view is grouped by next step
-  and shows only issues nobody has marked done. `claim` names who is handling an issue (the
-  Mine filter, an avatar on the row), `setStatus` moves it out of or back into the queue, and
-  `accept` confirms the model's next step, category, area and duplicate as feedback and marks it
-  done in one go. The Unsure view lists what the model was not confident about, least confident
-  first. Repo shows maintainer health; System holds cost controls, worker stats and calibration.
-- **Recalculate**: "flag" marks the filtered issues; "version" bumps `questions_version` so every
-  issue gets new rows (old ones stay for comparison).
-- **Priority** = user-weighted sum of severity, urgency, reactions, comments and age; sliders
-  change no inference. Pull requests use a fixed attention policy (`pullAttention`): approved and
-  mergeable first, then awaiting review (older and quicker first), then changes requested, drafts
-  last.
-- **Presence**: heartbeat mutator every 15 s; rows older than 45 s are ignored by clients.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how sync, classification, feedback and the
+triage queue fit together, and `CLAUDE.md` for the working rules if you use a coding agent.
 
-### Conflict rule
+## License
 
-Feedback is append-only and keyed by a client-generated id, so concurrent edits never conflict:
-the newest row wins for display and every row stays in the history. Repo knobs are last-writer-wins
-through Zero's rebase.
-
-### Measured cost (jev-1.13.0, voidzero-dev/vite-plus)
-
-| Batch     | Questions | Input tokens | Output tokens | Latency    |
-| --------- | --------- | ------------ | ------------- | ---------- |
-| 20 issues | 124–128   | 25.0K–27.5K  | 4.8K–5.0K     | 350–810 ms |
-
-| 8 pulls | 16 | 16.5K–17.2K | ~2K | 255–275 ms |
-
-About 205 input tokens per question including the amortised state (issue bodies are the bulk).
-Pull batches are capped at 8 because a 20-pull request (files plus candidate histories) exceeded
-the model's window.
-Set `TYPESAFE_PRICE_INPUT_PER_MTOK` / `TYPESAFE_PRICE_OUTPUT_PER_MTOK` to see dollars in the UI.
-Per-repo `budget_tokens` stops the worker; raise it in Settings to continue.
+[MIT](LICENSE).
