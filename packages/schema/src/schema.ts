@@ -16,14 +16,19 @@ export type ZeroContext = {
   color: string;
 };
 
+/**
+ * Families asked about issues (questions v2). `action` is the maintainer's next step and
+ * `missing` what a reply should ask for; both are choices. Older rows of retired kinds
+ * (needs_info, actionable) stay in the table as history and are simply not read.
+ */
 export const CLASSIFICATION_KINDS = [
   "category",
   "area",
   "severity",
-  "needs_info",
-  "actionable",
-  "duplicate",
   "urgency",
+  "duplicate",
+  "action",
+  "missing",
 ] as const;
 export type ClassificationKind = (typeof CLASSIFICATION_KINDS)[number];
 
@@ -33,6 +38,10 @@ export type PullKind = (typeof PULL_KINDS)[number];
 
 export const CATEGORIES = ["bug", "feature", "question", "docs", "chore", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
+
+/** Triage queue state of an issue. `done` leaves the queue; claiming names who is on it. */
+export const TRIAGE_STATUSES = ["open", "done"] as const;
+export type TriageStatus = (typeof TRIAGE_STATUSES)[number];
 
 const user = table("user")
   .columns({
@@ -72,6 +81,8 @@ const repo = table("repo")
     cadence_ms: number(),
     budget_tokens: number(),
     tokens_used: number(),
+    input_tokens_used: number(),
+    output_tokens_used: number(),
     paused: boolean(),
     created_at: number(),
   })
@@ -115,6 +126,20 @@ const issueLabel = table("issue_label")
     label_id: string(),
   })
   .primaryKey("issue_id", "label_id");
+
+/** One row per issue once anyone claims it or marks it done; absent means open and unclaimed. */
+const triage = table("triage")
+  .columns({
+    issue_id: string(),
+    repo_id: string(),
+    status: string(),
+    claimed_by: string().optional(),
+    claimed_at: number().optional(),
+    done_by: string().optional(),
+    done_at: number().optional(),
+    updated_at: number(),
+  })
+  .primaryKey("issue_id");
 
 const pull = table("pull")
   .columns({
@@ -271,10 +296,16 @@ const issueRelationships = relationships(issue, ({ many, one }) => ({
   }),
   feedback: many({ sourceField: ["id"], destSchema: feedback, destField: ["issue_id"] }),
   presence: many({ sourceField: ["id"], destSchema: presence, destField: ["issue_id"] }),
+  triage: one({ sourceField: ["id"], destSchema: triage, destField: ["issue_id"] }),
   labels: many(
     { sourceField: ["id"], destSchema: issueLabel, destField: ["issue_id"] },
     { sourceField: ["label_id"], destSchema: label, destField: ["id"] },
   ),
+}));
+
+const triageRelationships = relationships(triage, ({ one }) => ({
+  issue: one({ sourceField: ["issue_id"], destSchema: issue, destField: ["id"] }),
+  claimer: one({ sourceField: ["claimed_by"], destSchema: user, destField: ["id"] }),
 }));
 
 const pullRelationships = relationships(pull, ({ many, one }) => ({
@@ -309,6 +340,7 @@ export const schema = createSchema({
     label,
     issue,
     issueLabel,
+    triage,
     pull,
     pullReview,
     reviewer,
@@ -321,6 +353,7 @@ export const schema = createSchema({
   relationships: [
     repoRelationships,
     issueRelationships,
+    triageRelationships,
     pullRelationships,
     feedbackRelationships,
     classificationRelationships,

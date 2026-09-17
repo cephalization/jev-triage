@@ -1,10 +1,13 @@
 import { useQuery, useZero } from "@rocicorp/zero/react";
 import { mutators, queries } from "@triage/schema";
+import { calibrate, expectedCalibrationError } from "@triage/triage/calibration";
 import { THRESHOLDS } from "@triage/triage/policy";
 import type { PriorityWeights } from "@triage/triage/priority";
-import { useEffect, useState } from "react";
-import { pokeWorker } from "../lib/api.ts";
-import { ago, compact } from "../lib/format.ts";
+import { useEffect, useMemo, useState } from "react";
+import { costOf, pokeWorker, usePrices } from "../lib/api.ts";
+import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
+import { ago, compact, pct } from "../lib/format.ts";
+import { Columns, Legend } from "./Charts.tsx";
 import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
@@ -18,6 +21,16 @@ const WEIGHT_KEYS: (keyof PriorityWeights)[] = [
   "comments",
   "age",
 ];
+
+function Tile({ label, value, sub }: { label: string; value: string; sub?: string }) {
+  return (
+    <div className="flex flex-col gap-1 border-t pt-3">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className="text-xl font-semibold tracking-tight tabular-nums">{value}</div>
+      {sub && <div className="truncate text-xs text-muted-foreground">{sub}</div>}
+    </div>
+  );
+}
 
 function Section({
   title,
@@ -34,19 +47,22 @@ function Section({
         <h2 className="font-medium">{title}</h2>
         <p className="mt-1 text-xs text-muted-foreground text-pretty">{description}</p>
       </div>
-      <div className="flex max-w-md flex-col gap-4">{children}</div>
+      <div className="flex max-w-xl flex-col gap-4">{children}</div>
     </section>
   );
 }
 
-export function Settings({
+/** Operator-facing: how the model and worker are doing, what they cost, and the knobs. */
+export function SystemPanel({
   repoId,
+  rows,
   weights,
   setWeights,
   visibleIssueIds,
   now,
 }: {
   repoId: string | null;
+  rows: TriageRow[];
   weights: PriorityWeights;
   setWeights: (w: PriorityWeights) => void;
   visibleIssueIds: string[];
@@ -54,6 +70,8 @@ export function Settings({
 }) {
   const z = useZero();
   const [repo] = useQuery(repoId ? queries.repos.byId(repoId) : undefined);
+  const [runs] = useQuery(repoId ? queries.runs.byRepo({ repoId, limit: 30 }) : undefined);
+  const prices = usePrices();
   const [batch, setBatch] = useState("20");
   const [cadence, setCadence] = useState("2000");
   const [budget, setBudget] = useState("0");
@@ -78,39 +96,68 @@ export function Settings({
     repo?.pull_history_limit,
   ]);
 
+  const classifyRuns = useMemo(
+    () => (runs ?? []).filter((r) => r.kind.startsWith("classify") && r.status === "ok").reverse(),
+    [runs],
+  );
+  const totals = classifyRuns.reduce(
+    (a, r) => ({
+      input: a.input + r.input_tokens,
+      output: a.output + r.output_tokens,
+      ms: a.ms + r.latency_ms,
+      q: a.q + r.questions,
+    }),
+    { input: 0, output: 0, ms: 0, q: 0 },
+  );
+  const cost = costOf(totals.input, totals.output, prices);
+  const spent = repo
+    ? costOf(Number(repo.input_tokens_used), Number(repo.output_tokens_used), prices)
+    : null;
+  const pairs = calibrationPairs(rows);
+  const cal = calibrate(pairs, 5);
+  const ece = expectedCalibrationError(cal);
   const ws = repo?.workerState;
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col divide-y p-6">
-      <Section
-        title="Priority weights"
-        description="Only the view changes; nothing is re-asked. Stored in this browser."
-      >
-        {WEIGHT_KEYS.map((k) => (
-          <div key={k} className="flex flex-col gap-1.5">
-            <div className="flex justify-between">
-              <Label className="capitalize">{k}</Label>
-              <span className="text-xs text-muted-foreground tabular-nums">
-                {weights[k].toFixed(2)}
-              </span>
-            </div>
-            <Slider
-              min={0}
-              max={1}
-              step={0.05}
-              value={[weights[k]]}
-              onValueChange={([v]) => setWeights({ ...weights, [k]: v ?? 0 })}
-            />
-          </div>
-        ))}
-        <p className="text-xs text-muted-foreground text-pretty">
-          Policy thresholds live in code: category auto-apply at {THRESHOLDS.categoryAuto}, area at{" "}
-          {THRESHOLDS.areaAuto}, duplicate at {THRESHOLDS.duplicateMin}, reviewer at{" "}
-          {THRESHOLDS.reviewerAuto}. Duplicates are never auto-closed.
-        </p>
-      </Section>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-5 pb-6 sm:grid-cols-5">
+        <Tile
+          label="Spent to date"
+          value={spent ?? "–"}
+          sub={
+            repo
+              ? `${compact(Number(repo.input_tokens_used))} in · ${compact(Number(repo.output_tokens_used))} out${prices ? "" : " · set TYPESAFE_PRICE_* to price"}`
+              : "pick a repository"
+          }
+        />
+        <Tile
+          label="Tokens, last 30 runs"
+          value={`${compact(totals.input)} in`}
+          sub={`${compact(totals.output)} out${cost ? ` · ${cost}` : ""}`}
+        />
+        <Tile
+          label="Per question"
+          value={totals.q ? `${Math.round(totals.input / totals.q)} in` : "–"}
+          sub={
+            classifyRuns.length
+              ? `${Math.round(totals.ms / classifyRuns.length)} ms per request`
+              : "no runs yet"
+          }
+        />
+        <Tile
+          label="Waiting for the model"
+          value={String(ws?.pending ?? 0)}
+          sub={ws?.in_flight ? "one request in flight" : "idle"}
+        />
+        <Tile
+          label="Calibration error"
+          value={ece === null ? "–" : ece.toFixed(2)}
+          sub={`${pairs.length} model vs human pairs`}
+        />
+      </div>
 
       <Section
-        title="Cost controls"
+        title="Classification"
         description="Shared with everyone on this repo. One TypeSafe request per batch, one in flight."
       >
         {!repo && <p className="text-muted-foreground">Pick a repository first.</p>}
@@ -220,6 +267,108 @@ export function Settings({
         )}
       </Section>
 
+      <Section
+        title="Priority weights"
+        description="How the priority bars in the list are computed. Only the view changes; nothing is re-asked. Stored in this browser."
+      >
+        {WEIGHT_KEYS.map((k) => (
+          <div key={k} className="flex flex-col gap-1.5">
+            <div className="flex justify-between">
+              <Label className="capitalize">{k}</Label>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {weights[k].toFixed(2)}
+              </span>
+            </div>
+            <Slider
+              min={0}
+              max={1}
+              step={0.05}
+              value={[weights[k]]}
+              onValueChange={([v]) => setWeights({ ...weights, [k]: v ?? 0 })}
+            />
+          </div>
+        ))}
+        <p className="text-xs text-muted-foreground text-pretty">
+          Policy thresholds live in code: category auto-apply at {THRESHOLDS.categoryAuto}, area at{" "}
+          {THRESHOLDS.areaAuto}, next step at {THRESHOLDS.actionAuto}, duplicate at{" "}
+          {THRESHOLDS.duplicateMin}, reviewer at {THRESHOLDS.reviewerAuto}. Duplicates are never
+          auto-closed.
+        </p>
+      </Section>
+
+      <Section
+        title="Calibration"
+        description="Model confidence vs. agreement with human feedback on category, area and next step. A well-calibrated model agrees about as often as it is confident."
+      >
+        {pairs.length === 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Confirm or correct a few suggestions to populate this.
+          </p>
+        ) : (
+          <>
+            <Columns
+              data={cal.map((b) => ({
+                label: `${Math.round(b.from * 100)}–${Math.round(b.to * 100)}`,
+                value: b.agreement ?? 0,
+                marker: b.meanConfidence,
+                hint: `${Math.round(b.from * 100)}–${Math.round(b.to * 100)}% confidence: ${b.count} pairs, agreement ${pct(b.agreement)}, mean confidence ${pct(b.meanConfidence)}`,
+              }))}
+              max={1}
+              format={(v) => pct(v)}
+            />
+            <Legend
+              items={[
+                { label: "agreement with humans", color: "#2a78d6" },
+                { label: "mean confidence", color: "#eb6834", shape: "dot" },
+              ]}
+            />
+            <details className="text-xs text-muted-foreground">
+              <summary className="cursor-pointer">Table</summary>
+              <table className="mt-2 w-full max-w-md text-left tabular-nums">
+                <thead>
+                  <tr>
+                    <th className="font-medium whitespace-nowrap">Bucket</th>
+                    <th className="font-medium whitespace-nowrap">Pairs</th>
+                    <th className="font-medium whitespace-nowrap">Agreement</th>
+                    <th className="font-medium whitespace-nowrap">Mean confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {cal.map((b) => (
+                    <tr key={b.from} className="border-t">
+                      <td>
+                        {Math.round(b.from * 100)}–{Math.round(b.to * 100)}%
+                      </td>
+                      <td>{b.count}</td>
+                      <td>{pct(b.agreement)}</td>
+                      <td>{pct(b.meanConfidence)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          </>
+        )}
+      </Section>
+
+      <Section
+        title="Requests"
+        description={`Input tokens for the last ${classifyRuns.length} classification runs. Hover for latency.`}
+      >
+        {classifyRuns.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No runs yet.</p>
+        ) : (
+          <Columns
+            data={classifyRuns.map((r, i) => ({
+              label: String(i + 1),
+              value: r.input_tokens,
+              hint: `${r.issues} ${r.kind === "classify_pulls" ? "pulls" : "issues"}, ${r.questions} questions: ${compact(r.input_tokens)} in / ${compact(r.output_tokens)} out, ${r.latency_ms} ms, ${r.model ?? ""}`,
+            }))}
+            format={(v) => compact(v)}
+          />
+        )}
+      </Section>
+
       <Section title="Worker" description="Backpressure stats, live from the server.">
         {!ws && <p className="text-muted-foreground">No runs yet.</p>}
         {ws && (
@@ -228,7 +377,7 @@ export function Settings({
             <dd>{ws.in_flight ? "yes" : "no"}</dd>
             <dt className="text-muted-foreground">Dirty</dt>
             <dd>{ws.dirty ? "yes" : "no"}</dd>
-            <dt className="text-muted-foreground">Pending issues</dt>
+            <dt className="text-muted-foreground">Pending</dt>
             <dd className="tabular-nums">{ws.pending}</dd>
             <dt className="text-muted-foreground">Requests</dt>
             <dd className="tabular-nums">{ws.requests}</dd>
@@ -265,7 +414,7 @@ export function Settings({
                 )
               }
             >
-              Recalculate {visibleIssueIds.length} in view
+              Re-ask {visibleIssueIds.length} in the triage list
             </Button>
           </div>
         )}

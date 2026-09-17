@@ -1,16 +1,16 @@
 import { useQuery } from "@rocicorp/zero/react";
 import { CATEGORIES, queries } from "@triage/schema";
 import { cn } from "cn";
-import { ListFilter, Menu, Search } from "lucide-react";
+import { CircleCheck, Hand, Menu, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IssuePanel } from "./components/IssuePanel.tsx";
 import { IssueTable, type UserInfo } from "./components/IssueTable.tsx";
 import { PullPanel } from "./components/PullPanel.tsx";
 import { PullTable } from "./components/PullTable.tsx";
+import { RepoPanel } from "./components/RepoPanel.tsx";
 import { ReviewerBreakdown } from "./components/ReviewerBreakdown.tsx";
-import { Settings } from "./components/Settings.tsx";
 import { Sidebar, type View } from "./components/Sidebar.tsx";
-import { StatsPanel } from "./components/StatsPanel.tsx";
+import { SystemPanel } from "./components/SystemPanel.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
 import {
@@ -26,6 +26,7 @@ import type { Session } from "./lib/auth.ts";
 import {
   derivePulls,
   deriveRows,
+  groupByAction,
   groupByReviewer,
   sortPulls,
   sortRows,
@@ -42,20 +43,22 @@ type PullStateFilter = "open" | "merged" | "closed" | "all";
 
 const VIEW_TITLE: Record<View, string> = {
   triage: "Triage",
-  review: "Review",
+  unsure: "Unsure",
   pulls: "Pull requests",
-  stats: "Stats",
-  settings: "Settings",
+  repo: "Repo",
+  system: "System",
 };
 const GO: Record<string, View> = {
   t: "triage",
-  r: "review",
+  u: "unsure",
   p: "pulls",
-  s: "stats",
-  ",": "settings",
+  r: "repo",
+  s: "system",
 };
 const FILTER_TRIGGER =
   "h-7 gap-1 border-transparent bg-transparent px-2 text-xs shadow-none hover:bg-accent dark:bg-transparent dark:hover:bg-accent";
+const TOGGLE =
+  "inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground data-active:bg-accent data-active:text-foreground";
 
 /** Two-or-three way switch in the compact header style. */
 function Segmented<T extends string>({
@@ -114,6 +117,7 @@ export function App({
   /** A server-rejected write: re-verify the token and sign out if it is dead. */
   onSessionRejected: (error: unknown) => void;
 }) {
+  const selfId = session.user.userID;
   const [repos] = useQuery(queries.repos.all());
   const [{ repoId: storedRepo }, setStoredRepo] = useLocalState<{ repoId: string | null }>(
     "typeful-triage.repo",
@@ -133,6 +137,8 @@ export function App({
   });
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
+  const [mine, setMine] = useState(false);
+  const [showDone, setShowDone] = useState(false);
   const [reviewOnly, setReviewOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
     key: "updated",
@@ -144,8 +150,12 @@ export function App({
   const [weights, setWeights] = useWeights();
   const [theme, setTheme] = useTheme();
   const now = useNow();
-  const listView = view === "triage" || view === "review";
+  const listView = view === "triage" || view === "unsure";
   const pullView = view === "pulls";
+  const [triageLayout, setTriageLayout] = useLocalState<{ grouped: boolean }>(
+    "typeful-triage.triage-layout",
+    { grouped: true },
+  );
   const [pullLayout, setPullLayout] = useLocalState<{ grouped: boolean; mode: ReviewerMode }>(
     "typeful-triage.pull-layout",
     { grouped: false, mode: "balanced" },
@@ -194,21 +204,27 @@ export function App({
     () => pullRows.filter((r) => r.pull.state === "open").length,
     [pullRows],
   );
+  // The queue: what nobody has marked done. Everything else is a filter on top of it.
+  const queue = useMemo(() => rows.filter((r) => !r.done), [rows]);
   const filtered = useMemo(() => {
-    let r = rows;
+    let r = showDone ? rows : queue;
+    if (mine) r = r.filter((x) => x.claimedBy === selfId);
     if (category !== "all")
       r = r.filter((x) => (category === "unclassified" ? x.unclassified : x.category === category));
-    if (reviewOnly) r = r.filter((x) => x.needsReview);
     return sortRows(r, sort.key, sort.dir);
-  }, [rows, category, reviewOnly, sort]);
-  const reviewRows = useMemo(
+  }, [rows, queue, showDone, mine, selfId, category, sort]);
+  const triageGroups = useMemo(
+    () => (view === "triage" && triageLayout.grouped ? groupByAction(filtered) : null),
+    [view, triageLayout.grouped, filtered],
+  );
+  const unsureRows = useMemo(
     () =>
       sortRows(
-        rows.filter((r) => r.needsReview),
+        queue.filter((r) => r.needsReview),
         "confidence",
         "asc",
       ),
-    [rows],
+    [queue],
   );
   const userMap = useMemo(
     () =>
@@ -217,17 +233,22 @@ export function App({
       ),
     [users],
   );
-  const numberToId = useMemo(() => new Map((issues ?? []).map((i) => [i.number, i.id])), [issues]);
+  const issuesByNumber = useMemo(
+    () => new Map((issues ?? []).map((i) => [i.number, { id: i.id, title: i.title }])),
+    [issues],
+  );
   const areaLabels = useMemo(() => (repo?.labels ?? []).map((l) => l.name).sort(), [repo?.labels]);
-  const visible = view === "review" ? reviewRows : filtered;
+  const visible = view === "unsure" ? unsureRows : filtered;
   const visibleIds = useMemo(
     () =>
       pullGroups
         ? pullGroups.flatMap((g) => g.rows.map((r) => r.pull.id))
         : pullView
           ? filteredPulls.map((r) => r.pull.id)
-          : visible.map((r) => r.issue.id),
-    [pullGroups, pullView, filteredPulls, visible],
+          : triageGroups
+            ? triageGroups.flatMap((g) => g.rows.map((r) => r.issue.id))
+            : visible.map((r) => r.issue.id),
+    [pullGroups, pullView, filteredPulls, triageGroups, visible],
   );
   const loading = !!repoId && issuesResult?.type !== "complete" && (issues ?? []).length === 0;
   const pullsLoading = !!repoId && pullsResult?.type !== "complete" && (pulls ?? []).length === 0;
@@ -254,11 +275,11 @@ export function App({
   }, []);
   const openIssue = useCallback((id: string) => {
     setSelectedId(id);
-    setView((v) => (v === "triage" || v === "review" ? v : "triage"));
+    setView((v) => (v === "triage" || v === "unsure" ? v : "triage"));
     setNavOpen(false);
   }, []);
 
-  // Keyboard: j/k move, Esc closes, / searches, g+t/r/p/s/, switches views. The panel handles 1–6.
+  // Keyboard: j/k move, Esc closes, / searches, g+t/u/p/r/s switches views. The panel handles the rest.
   const move = useCallback(
     (delta: number) => {
       if (visibleIds.length === 0) return;
@@ -277,6 +298,15 @@ export function App({
     },
     [visibleIds, selectedId],
   );
+  /** After an issue leaves the queue, select its neighbour so the flow continues. */
+  const advance = useCallback(() => {
+    const idx = visibleIds.indexOf(selectedId ?? "");
+    if (idx < 0) return;
+    const next = visibleIds[idx + 1] ?? visibleIds[idx - 1] ?? null;
+    setSelectedId(next);
+    if (next)
+      document.querySelector(`[data-issue-id="${next}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [visibleIds, selectedId]);
   const chord = useRef<number>(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -316,7 +346,7 @@ export function App({
       onSelectRepo={(id) => setStoredRepo({ repoId: id })}
       view={view}
       onView={changeView}
-      counts={{ triage: rows.length, review: reviewRows.length, pulls: openPullCount }}
+      counts={{ triage: queue.length, unsure: unsureRows.length, pulls: openPullCount }}
       onOpenIssue={openIssue}
       onLogout={onLogout}
       theme={theme}
@@ -406,10 +436,9 @@ export function App({
                   type="button"
                   data-active={reviewOnly || undefined}
                   onClick={() => setReviewOnly((v) => !v)}
-                  className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground data-active:bg-accent data-active:text-foreground"
+                  className={TOGGLE}
                 >
-                  <ListFilter className="size-3.5" />
-                  Needs review
+                  Unsure only
                 </button>
               )}
               {view === "triage" && (
@@ -430,12 +459,23 @@ export function App({
                   </Select>
                   <button
                     type="button"
-                    data-active={reviewOnly || undefined}
-                    onClick={() => setReviewOnly((v) => !v)}
-                    className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent hover:text-foreground data-active:bg-accent data-active:text-foreground"
+                    data-active={mine || undefined}
+                    onClick={() => setMine((v) => !v)}
+                    className={TOGGLE}
+                    title="Only issues you claimed"
                   >
-                    <ListFilter className="size-3.5" />
-                    Needs review
+                    <Hand className="size-3.5" />
+                    Mine
+                  </button>
+                  <button
+                    type="button"
+                    data-active={showDone || undefined}
+                    onClick={() => setShowDone((v) => !v)}
+                    className={TOGGLE}
+                    title="Include issues already marked triaged"
+                  >
+                    <CircleCheck className="size-3.5" />
+                    Done
                   </button>
                 </>
               )}
@@ -451,11 +491,17 @@ export function App({
                     <span>move</span>
                     <span>Esc</span>
                     <span>close</span>
+                    <span>a</span>
+                    <span>looks right, done</span>
+                    <span>c</span>
+                    <span>claim / release</span>
+                    <span>x</span>
+                    <span>done / reopen</span>
                     <span>1–6</span>
                     <span>set category</span>
                     <span>/</span>
                     <span>search</span>
-                    <span>g then t r p s ,</span>
+                    <span>g then t u p r s</span>
                     <span>switch view</span>
                   </div>
                 </TooltipContent>
@@ -467,36 +513,63 @@ export function App({
         <div className="relative flex min-h-0 flex-1">
           <section className="@container min-w-0 flex-1 overflow-auto">
             {view === "triage" && (
-              <IssueTable
-                rows={filtered}
-                users={userMap}
-                now={now}
-                sort={sort}
-                onSort={onSort}
-                onOpen={setSelectedId}
-                selectedId={selectedId}
-                numberToId={numberToId}
-                loading={loading}
-                emptyText={repoId ? "No issues match." : "Add a repository to start."}
-              />
-            )}
-            {view === "review" && (
               <>
-                <p className="border-b px-4 py-2 text-xs text-muted-foreground">
-                  Lowest confidence first: the model was unsure, a person disagreed, or a duplicate
-                  is suspected.
-                </p>
+                <div className="sticky top-0 z-20 flex h-8 items-center gap-2 border-b bg-background px-4 text-xs text-muted-foreground">
+                  <span className="min-w-0 flex-1 truncate">
+                    {triageLayout.grouped
+                      ? "Grouped by what a maintainer should do next. Mark an issue done to clear it from the queue."
+                      : "One list, sorted your way. Mark an issue done to clear it from the queue."}
+                  </span>
+                  <Segmented
+                    label="Layout"
+                    value={triageLayout.grouped ? "grouped" : "list"}
+                    options={[
+                      ["grouped", "By next step"],
+                      ["list", "List"],
+                    ]}
+                    onChange={(v) => setTriageLayout({ grouped: v === "grouped" })}
+                  />
+                </div>
                 <IssueTable
-                  rows={reviewRows}
+                  rows={filtered}
+                  groups={triageGroups ?? undefined}
+                  users={userMap}
+                  now={now}
+                  sort={sort}
+                  onSort={onSort}
+                  onOpen={setSelectedId}
+                  selectedId={selectedId}
+                  loading={loading}
+                  emptyText={
+                    repoId
+                      ? mine
+                        ? "You have not claimed anything."
+                        : showDone
+                          ? "No issues match."
+                          : "Queue clear. Nothing left to triage."
+                      : "Add a repository to start."
+                  }
+                />
+              </>
+            )}
+            {view === "unsure" && (
+              <>
+                <div className="sticky top-0 z-20 flex h-8 items-center border-b bg-background px-4 text-xs text-muted-foreground">
+                  <span className="truncate">
+                    Where the model was unsure or a person disagreed with it, least confident first.
+                    A look from you here teaches the model the team's conventions.
+                  </span>
+                </div>
+                <IssueTable
+                  rows={unsureRows}
                   users={userMap}
                   now={now}
                   sort={{ key: "confidence", dir: "asc" }}
                   onSort={() => {}}
                   onOpen={setSelectedId}
                   selectedId={selectedId}
-                  numberToId={numberToId}
                   loading={loading}
-                  emptyText="Nothing to review."
+                  emptyText="Nothing the model is unsure about."
                 />
               </>
             )}
@@ -554,17 +627,18 @@ export function App({
                 />
               </>
             )}
-            {view === "stats" && (
-              <StatsPanel
-                repoId={repoId}
+            {view === "repo" && (
+              <RepoPanel
                 rows={rows}
                 pullRows={pullRows}
                 reviewers={reviewers ?? []}
+                users={userMap}
               />
             )}
-            {view === "settings" && (
-              <Settings
+            {view === "system" && (
+              <SystemPanel
                 repoId={repoId}
+                rows={rows}
                 weights={weights}
                 setWeights={setWeights}
                 visibleIssueIds={filtered.map((r) => r.issue.id)}
@@ -588,8 +662,11 @@ export function App({
                   issueId={selectedId}
                   questionsVersion={version}
                   areaLabels={areaLabels}
-                  numberToId={numberToId}
+                  issuesByNumber={issuesByNumber}
+                  users={userMap}
+                  selfId={selfId}
                   onClose={() => setSelectedId(null)}
+                  onAdvance={advance}
                   now={now}
                 />
               )}

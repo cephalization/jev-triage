@@ -5,8 +5,10 @@ import {
   calibrationPairs,
   derivePulls,
   deriveRows,
+  groupByAction,
   groupByReviewer,
   sortRows,
+  whyLine,
   type IssueInput,
   type PullInput,
 } from "./derive.ts";
@@ -81,6 +83,66 @@ describe("deriveRows", () => {
     expect(a[0]!.priority).toBeGreaterThan(a[1]!.priority);
     expect(b[0]!.priority).toBeLessThan(b[1]!.priority);
     expect(sortRows(a, "priority", "desc")[0]!.issue.number).toBe(1);
+  });
+
+  test("next step, missing info and triage state come through", () => {
+    const rows = deriveRows(
+      [
+        base(1, {
+          classifications: [
+            cls("category", "bug"),
+            cls("action", "ask_author", 0.7),
+            cls("missing", "repro_steps", 0.8),
+          ],
+          triage: { status: "open", claimed_by: "bob" },
+        }),
+        base(2, {
+          classifications: [cls("action", "accept", 0.3), cls("missing", "none")],
+          feedback: [{ id: "f", kind: "action", value: "close", user_id: "u", created_at: 9 }],
+          triage: { status: "done", done_by: "u" },
+        }),
+        base(3, { classifications: [cls("action", "investigate", 0.2)] }),
+      ],
+      1,
+      DEFAULT_WEIGHTS,
+      undefined,
+      5000,
+    );
+    expect(rows[0]).toMatchObject({
+      action: "ask_author",
+      actionSource: "model",
+      missing: "repro_steps",
+      claimedBy: "bob",
+      done: false,
+    });
+    expect(rows[0]!.why).toBe("Likely bug · missing repro steps");
+    expect(rows[1]).toMatchObject({
+      action: "close",
+      actionSource: "human",
+      missing: null,
+      done: true,
+    });
+    expect(rows[1]!.reviewReasons).toEqual([expect.stringMatching(/overrode next step/)]);
+    expect(rows[2]!.reviewReasons).toEqual([expect.stringMatching(/next step unclear/)]);
+  });
+
+  test("groupByAction follows the fixed section order and puts unclassified last", () => {
+    const rows = deriveRows(
+      [
+        base(1),
+        base(2, { classifications: [cls("action", "close")] }),
+        base(3, { classifications: [cls("action", "ask_author")] }),
+        base(4, { classifications: [cls("action", "close")] }),
+        base(5, { classifications: [cls("action", "bogus")] }),
+      ],
+      1,
+      DEFAULT_WEIGHTS,
+    );
+    expect(groupByAction(rows).map((g) => [g.action, g.rows.map((r) => r.issue.number)])).toEqual([
+      ["ask_author", [3]],
+      ["close", [2, 4]],
+      [null, [1, 5]],
+    ]);
   });
 
   test("calibration pairs only where both model and human answered", () => {
@@ -262,5 +324,53 @@ describe("groupByReviewer", () => {
     const balanced = groupByReviewer(rows, "balanced");
     expect(balanced.map((g) => g.login)).toEqual(["bob", "carol", null]);
     expect(balanced[0]!.rows.length + balanced[1]!.rows.length).toBe(3);
+  });
+});
+
+describe("whyLine", () => {
+  const empty = {
+    category: null,
+    categorySource: "none" as const,
+    severity: null,
+    urgency: null,
+    action: null,
+    missing: null,
+    duplicateOf: null,
+    reactions: 0,
+    comments: 0,
+    ageDays: 0,
+  };
+
+  test("composes only what is known", () => {
+    expect(whyLine(empty)).toBe("");
+    expect(
+      whyLine({
+        ...empty,
+        category: "bug",
+        categorySource: "model",
+        severity: 0.7,
+        urgency: 0.9,
+        reactions: 14,
+        comments: 1,
+        ageDays: 40.4,
+      }),
+    ).toBe(
+      "Likely bug · blocks a workflow · needs attention now · 14 reactions · 1 comment · open 40d",
+    );
+  });
+
+  test("confirmed categories drop the hedge; questions read naturally", () => {
+    expect(whyLine({ ...empty, category: "question", categorySource: "human" })).toBe("A question");
+    expect(whyLine({ ...empty, category: "question", categorySource: "model" })).toBe(
+      "Likely a question",
+    );
+  });
+
+  test("missing info only matters when the next step is to ask", () => {
+    expect(whyLine({ ...empty, action: "ask_author", missing: "versions" })).toBe(
+      "missing versions",
+    );
+    expect(whyLine({ ...empty, action: "accept", missing: "versions" })).toBe("");
+    expect(whyLine({ ...empty, duplicateOf: "I_9" })).toBe("possible duplicate");
   });
 });

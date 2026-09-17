@@ -2,10 +2,10 @@ import { useQuery } from "@rocicorp/zero/react";
 import { queries } from "@triage/schema";
 import { cn } from "cn";
 import {
-  ChartColumn,
+  Activity as ActivityIcon,
   Check,
   ChevronsUpDown,
-  CircleAlert,
+  CircleHelp,
   GitPullRequest,
   Inbox,
   LogOut,
@@ -14,11 +14,11 @@ import {
   MoreHorizontal,
   Plus,
   RefreshCw,
-  Settings as SettingsIcon,
+  Settings2,
   Sun,
 } from "lucide-react";
 import { useState } from "react";
-import { parseRepoSpec, startSync } from "../lib/api.ts";
+import { costOf, parseRepoSpec, startSync, usePrices } from "../lib/api.ts";
 import type { Session } from "../lib/auth.ts";
 import { ago, compact } from "../lib/format.ts";
 import type { Theme } from "../lib/theme.ts";
@@ -46,14 +46,14 @@ import {
 import { Input } from "./ui/input.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
-export type View = "triage" | "review" | "pulls" | "stats" | "settings";
+export type View = "triage" | "unsure" | "pulls" | "repo" | "system";
 
 const NAV: { id: View; label: string; icon: typeof Inbox; key: string }[] = [
   { id: "triage", label: "Triage", icon: Inbox, key: "g t" },
-  { id: "review", label: "Review", icon: CircleAlert, key: "g r" },
+  { id: "unsure", label: "Unsure", icon: CircleHelp, key: "g u" },
   { id: "pulls", label: "Pull requests", icon: GitPullRequest, key: "g p" },
-  { id: "stats", label: "Stats", icon: ChartColumn, key: "g s" },
-  { id: "settings", label: "Settings", icon: SettingsIcon, key: "g ," },
+  { id: "repo", label: "Repo", icon: ActivityIcon, key: "g r" },
+  { id: "system", label: "System", icon: Settings2, key: "g s" },
 ];
 
 export function Sidebar({
@@ -264,8 +264,8 @@ function AddRepoDialog({
           <DialogHeader>
             <DialogTitle>Add repository</DialogTitle>
             <DialogDescription>
-              Issues and pull requests sync newest first and classify as they land. Caps live in
-              Settings.
+              Issues and pull requests sync newest first and get a suggested next step as they land.
+              Caps live in System.
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -300,6 +300,8 @@ interface RepoRow {
   last_synced_at?: number | null;
   paused: boolean;
   tokens_used: number;
+  input_tokens_used: number;
+  output_tokens_used: number;
   workerState?: {
     in_flight: boolean;
     pending: number;
@@ -310,77 +312,86 @@ interface RepoRow {
   } | null;
 }
 
-/** What the system is doing right now, straight from synced rows so every tab agrees. */
+/**
+ * What the system is doing right now, in one line each, straight from synced rows so every
+ * tab agrees. Counters and tokens live in the tooltip and on the System page.
+ */
 function Activity({ repo, now, onSync }: { repo: RepoRow; now: number; onSync: () => void }) {
   const ws = repo.workerState;
+  const prices = usePrices();
+  const spent = costOf(Number(repo.input_tokens_used), Number(repo.output_tokens_used), prices);
   const syncing = repo.sync_status === "running";
   const classifying = !!ws?.in_flight;
   const pending = ws?.pending ?? 0;
   const syncText = syncing
-    ? `${repo.sync_message ?? repo.sync_phase} · ${repo.sync_fetched} stored`
+    ? `Syncing · ${repo.sync_fetched} stored`
     : repo.sync_status === "error"
-      ? (repo.sync_error ?? "error")
-      : (repo.sync_message ?? "idle");
+      ? (repo.sync_error ?? "Sync failed")
+      : repo.last_synced_at
+        ? `Synced ${ago(repo.last_synced_at, now)}`
+        : "Not synced yet";
   const classifyText = repo.paused
-    ? `paused · ${pending} waiting`
+    ? `Paused · ${pending} waiting`
     : classifying
-      ? `in flight · ${pending} waiting`
+      ? `Classifying ${pending > 0 ? `${pending} left` : "…"}`
       : ws?.last_error
         ? ws.last_error
         : pending > 0
           ? `${pending} waiting`
-          : "up to date";
+          : "Up to date";
+  const details = [
+    `${compact(Number(repo.tokens_used))} tokens used${spent ? ` · ${spent} to date` : ""}`,
+    ws && ws.requests > 0 ? `${ws.requests} requests` : null,
+    ws && ws.coalesced_triggers > 0 ? `${ws.coalesced_triggers} coalesced` : null,
+    ws && ws.dropped_triggers > 0 ? `${ws.dropped_triggers} deferred` : null,
+    repo.sync_message ? `sync: ${repo.sync_message}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <div className="flex flex-col gap-2 px-2 pb-2 text-xs">
-      <div className="flex flex-col gap-0.5">
-        <div className="flex items-center gap-2">
-          <Dot state={syncing ? "live" : repo.sync_status === "error" ? "bad" : "idle"} />
-          <span className="flex-1 font-medium">Sync</span>
-          <span className="text-muted-foreground">{ago(repo.last_synced_at, now)}</span>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                disabled={syncing}
-                onClick={onSync}
-                aria-label="Sync now"
-                className="rounded-sm p-0.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground disabled:opacity-50"
-              >
-                <RefreshCw className={cn("size-3", syncing && "animate-spin")} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>Sync now</TooltipContent>
-          </Tooltip>
-        </div>
-        <div className="truncate pl-3.5 text-muted-foreground" title={syncText}>
+    <div className="flex flex-col gap-1 px-2 pb-2 text-xs">
+      <div className="flex items-center gap-2">
+        <Dot state={syncing ? "live" : repo.sync_status === "error" ? "bad" : "idle"} />
+        <span className="min-w-0 flex-1 truncate text-muted-foreground" title={syncText}>
           {syncText}
-        </div>
+        </span>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={onSync}
+              aria-label="Sync now"
+              className="rounded-sm p-0.5 text-muted-foreground hover:bg-sidebar-accent hover:text-foreground disabled:opacity-50"
+            >
+              <RefreshCw className={cn("size-3", syncing && "animate-spin")} />
+            </button>
+          </TooltipTrigger>
+          <TooltipContent>Sync now</TooltipContent>
+        </Tooltip>
       </div>
-      <div className="flex flex-col gap-0.5">
-        <div className="flex items-center gap-2">
-          <Dot
-            state={
-              classifying
-                ? "live"
-                : ws?.last_error
-                  ? "bad"
-                  : pending > 0 && !repo.paused
-                    ? "warn"
-                    : "idle"
-            }
-          />
-          <span className="flex-1 font-medium">Classify</span>
-          <span className="text-muted-foreground tabular-nums">
-            {compact(Number(repo.tokens_used))} tokens
-          </span>
-        </div>
-        <div className="truncate pl-3.5 text-muted-foreground" title={classifyText}>
-          {classifyText}
-          {ws && ws.requests > 0 && ` · ${ws.requests} requests`}
-          {ws && ws.coalesced_triggers > 0 && ` · ${ws.coalesced_triggers} coalesced`}
-          {ws && ws.dropped_triggers > 0 && ` · ${ws.dropped_triggers} deferred`}
-        </div>
-      </div>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className="flex items-center gap-2">
+            <Dot
+              state={
+                classifying
+                  ? "live"
+                  : ws?.last_error
+                    ? "bad"
+                    : pending > 0 && !repo.paused
+                      ? "warn"
+                      : "idle"
+              }
+            />
+            <span className="min-w-0 flex-1 truncate text-muted-foreground">{classifyText}</span>
+            {spent && <span className="text-muted-foreground tabular-nums">{spent}</span>}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="right" className="max-w-64">
+          {details}
+        </TooltipContent>
+      </Tooltip>
     </div>
   );
 }

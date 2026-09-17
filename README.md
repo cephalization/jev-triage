@@ -15,7 +15,8 @@ pnpm dev                      # postgres (docker) + migrations + api + zero-cach
 ```
 
 Open http://localhost:5173, sign in with any name, paste `owner/name`, press Add. Keys: j/k move,
-Esc closes the panel, 1–6 set the category, / focuses search.
+Esc closes the panel, a accepts the suggestion and marks the issue done, c claims it, x marks it
+done, 1–6 set the category, / focuses search, g then t/u/p/r/s switches views.
 
 ## Layout
 
@@ -53,7 +54,11 @@ vp run -r test      # unit tests in every package
   flight only sets `dirty` (counted as a dropped trigger); pokes inside the 300 ms collect window
   share one run (coalesced); a finished batch re-runs after `cadence_ms` only while issues remain.
   Each batch is one TypeSafe request: shared state (repo, area labels, up to 20 human-labelled
-  examples, ≤ 1500-char excerpts) × 6–7 questions per issue. Usage is written to `run` and logged.
+  examples with their category, area and next step, ≤ 1500-char excerpts) × 6–7 questions per
+  issue (questions v2): **category**, **area**, **severity**, **urgency**, **duplicate** (rerank
+  over code-found candidates), **action** (the single next step a maintainer should take: ask the
+  author, answer, investigate, decide, accept, close, or wait) and **missing** (what a reply should
+  ask for, asked speculatively for every issue). Usage is written to `run` and logged.
   Open pull requests follow in batches of ≤ 8 with two questions each: **review effort** (a Score
   over four rubric levels, judged from files, diff shape and description) and **reviewer** (a
   Choice over ≤ 5 candidates the code shortlisted by directory overlap, recency and volume, plus
@@ -62,6 +67,14 @@ vp run -r test      # unit tests in every package
 - **Feedback** (`mutators.feedback.set`): append-only rows; the effective value of a field is the
   latest human row, else the latest model row at the current `questions_version`. The server
   override of the mutator pokes the worker; the model's rows are refreshed, never overwritten.
+  A confirmation (`reclassify: false`, what "Looks right" sends) records the feedback without
+  re-asking.
+- **Triage queue** (`triage` table, `mutators.triage.*`): the Triage view is grouped by next step
+  and shows only issues nobody has marked done. `claim` names who is handling an issue (the
+  Mine filter, an avatar on the row), `setStatus` moves it out of or back into the queue, and
+  `accept` confirms the model's next step, category, area and duplicate as feedback and marks it
+  done in one go. The Unsure view lists what the model was not confident about, least confident
+  first. Repo shows maintainer health; System holds cost controls, worker stats and calibration.
 - **Recalculate**: "flag" marks the filtered issues; "version" bumps `questions_version` so every
   issue gets new rows (old ones stay for comparison).
 - **Priority** = user-weighted sum of severity, urgency, reactions, comments and age; sliders

@@ -48,7 +48,8 @@ export const queries = defineQueries({
         .related("classifications", (c) => c.orderBy("created_at", "desc"))
         .related("feedback", (f) => f.orderBy("created_at", "desc"))
         .related("labels")
-        .related("presence");
+        .related("presence")
+        .related("triage");
     }),
     byId: defineQuery(z.string(), ({ args: id }) =>
       zql.issue
@@ -57,7 +58,8 @@ export const queries = defineQueries({
         .related("classifications", (c) => c.orderBy("created_at", "desc"))
         .related("feedback", (f) => f.orderBy("created_at", "desc").related("user"))
         .related("labels")
-        .related("presence"),
+        .related("presence")
+        .related("triage"),
     ),
     byIds: defineQuery(z.array(z.string()), ({ args: ids }) => zql.issue.where("id", "IN", ids)),
   },

@@ -96,7 +96,7 @@ create table if not exists classification (
   issue_id text not null references issue(id) on delete cascade,
   repo_id text not null references repo(id) on delete cascade,
   questions_version integer not null,
-  kind text not null,                  -- category | area | severity | needs_info | actionable | duplicate | urgency
+  kind text not null,                  -- v1: category | area | severity | needs_info | actionable | duplicate | urgency; v2 adds action | missing (see 0004)
   value text not null,
   confidence real,
   probabilities_json jsonb not null default '{}'::jsonb,

@@ -16,10 +16,12 @@ export interface Decision {
   severity: number | null;
   /** 0..1, normalised expected score across the urgency rubric. */
   urgency: number | null;
-  needsInfo: { probability: number; yes: boolean } | null;
-  actionable: { probability: number; yes: boolean } | null;
+  /** The maintainer's next step; `applied` when confident enough to show without a warning. */
+  action: { value: string | null; confidence: number; applied: boolean };
+  /** What a reply should ask for; null when the model said nothing is missing. */
+  missing: { value: string | null; confidence: number };
   duplicate: { of: DuplicateCandidate | null; confidence: number; candidateKey: string | null };
-  /** True when a human should look: low-confidence category or a plausible duplicate. */
+  /** True when a human should look: low-confidence category or action, or a plausible duplicate. */
   needsReview: boolean;
   reasons: string[];
 }
@@ -59,12 +61,17 @@ export function decide(
     ? normaliseScore(answers.urgency.score, URGENCY_LEVELS.length)
     : null;
 
-  const needsInfo = answers.needs_info
-    ? { probability: answers.needs_info.noul, yes: answers.needs_info.noul >= t.yes }
-    : null;
-  const actionable = answers.actionable
-    ? { probability: answers.actionable.noul, yes: answers.actionable.noul >= t.yes }
-    : null;
+  const act = answers.action;
+  const action = act
+    ? { value: act.choice, confidence: act.confidence, applied: act.confidence >= t.actionAuto }
+    : { value: null, confidence: 0, applied: false };
+  if (act && !action.applied)
+    reasons.push(`next step unclear (confidence ${act.confidence.toFixed(2)} < ${t.actionAuto})`);
+
+  const mis = answers.missing;
+  const missing = mis
+    ? { value: mis.choice === NONE ? null : mis.choice, confidence: mis.confidence }
+    : { value: null, confidence: 0 };
 
   let duplicate: Decision["duplicate"] = { of: null, confidence: 0, candidateKey: null };
   const dup = answers.duplicate;
@@ -82,14 +89,17 @@ export function decide(
     duplicate = { of: null, confidence: dup.confidence, candidateKey: NONE };
   }
 
-  const needsReview = (cat !== undefined && !category.applied) || duplicate.of !== null;
+  const needsReview =
+    (cat !== undefined && !category.applied) ||
+    (act !== undefined && !action.applied) ||
+    duplicate.of !== null;
   return {
     category,
     area,
     severity,
     urgency,
-    needsInfo,
-    actionable,
+    action,
+    missing,
     duplicate,
     needsReview,
     reasons,

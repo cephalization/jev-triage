@@ -1,8 +1,10 @@
-import { choice, noul, score } from "@typesafe-ai/sdk";
-import type { ChoiceResponse, NoulResponse, ScoreResponse, Questions } from "@typesafe-ai/sdk";
+import { choice, score } from "@typesafe-ai/sdk";
+import type { ChoiceResponse, ScoreResponse, Questions } from "@typesafe-ai/sdk";
 import {
+  ACTION_LABELS,
   CATEGORY_LABELS,
   FAMILIES,
+  MISSING_LABELS,
   NONE,
   SEVERITY_LEVELS,
   URGENCY_LEVELS,
@@ -43,6 +45,7 @@ export function buildState(
       excerpt: e.excerpt,
       category: e.category,
       ...(e.area ? { area: e.area } : {}),
+      ...(e.action ? { next_action: e.action } : {}),
     })),
     issues: issues.map((i) => ({
       number: i.number,
@@ -83,8 +86,53 @@ const categoryCriteria = {
   other: "Spam, off-topic, meta discussion, or genuinely none of the above",
 } satisfies Record<(typeof CATEGORY_LABELS)[number], string>;
 
+/**
+ * The next step, phrased as what a maintainer would do, not what the issue is. Each option
+ * says what it covers and what belongs elsewhere so the boundaries are the model's, not ours.
+ */
+const actionCriteria = {
+  ask_author: {
+    what: "Reply asking the author for something needed before anyone can act: reproduction steps, versions or environment, expected versus actual behaviour, a minimal example, logs, or a concrete proposal",
+    not_for:
+      "Reports complete enough to reproduce or evaluate, even if a maintainer might have follow-up questions later",
+  },
+  answer: {
+    what: "Reply with an answer, an explanation, or a pointer to documentation: the author is asking how to do something, has a misunderstanding, or reports behaviour that is intended; nothing in the project needs to change",
+    not_for: "Questions that expose a real defect or a missing feature",
+  },
+  investigate: {
+    what: "A maintainer should reproduce or debug: a plausible defect with enough detail to try, where the cause and the fix are not yet known",
+    not_for: "Reports too thin to attempt (ask_author) or defects already understood (accept)",
+  },
+  decide: {
+    what: "The team must choose a direction first: a proposal, design question, or scope choice where work cannot start until maintainers agree",
+    not_for: "Small, uncontroversial requests that can simply be accepted",
+  },
+  accept: {
+    what: "Ready for the backlog: a clear, well-specified bug or request that needs labelling and prioritising and could be worked on today without asking the author anything",
+    not_for: "Anything that still needs a reply, a reproduction, or a decision",
+  },
+  close: {
+    what: "Should be closed: already resolved, cannot be reproduced, out of scope, spam, intended behaviour with nothing further to explain, or a duplicate of one of `candidates_for_duplicate`",
+    not_for: "Valid reports that merely need work",
+  },
+  wait: {
+    what: "Nothing for a maintainer to do right now: the ball is with the author or a third party, work is already in progress, or the next step cannot be judged from what is shown",
+  },
+} satisfies Record<(typeof ACTION_LABELS)[number], Record<string, string>>;
+
+const missingCriteria = {
+  repro_steps: "Steps to reproduce the problem",
+  versions: "Version, platform, or environment details",
+  expected_vs_actual: "What was expected and what actually happened",
+  minimal_example: "A minimal code sample or reproduction project",
+  logs_or_error: "The error message, stack trace, or logs",
+  concrete_proposal: "For a request: what specifically should change and why",
+  none: "Nothing important is missing; the report is complete enough to act on",
+} satisfies Record<(typeof MISSING_LABELS)[number], string>;
+
 export function buildQuestions(issues: readonly IssueForTriage[], repo: RepoForTriage) {
-  const questions: Record<string, ReturnType<typeof choice | typeof noul | typeof score>> = {};
+  const questions: Record<string, ReturnType<typeof choice | typeof score>> = {};
   const areaCriteria: Record<string, string | null> = {};
   for (const a of repo.areaLabels) areaCriteria[a] = null;
   areaCriteria[NONE] = "No listed area label fits this issue";
@@ -115,25 +163,30 @@ export function buildQuestions(issues: readonly IssueForTriage[], repo: RepoForT
       },
       SEVERITY_LEVELS,
     );
-    questions[questionKey(idx, "needs_info")] = noul(
-      `Is ${path} missing information a maintainer would need to reproduce or act on it (versions, steps, expected vs actual, a minimal example, or a concrete proposal)?`,
-      {
-        true: "Important details are missing; a maintainer would have to ask before doing anything",
-        false: "The report or request is complete enough to act on",
-      },
-    );
-    questions[questionKey(idx, "actionable")] = noul(
-      `Could a maintainer of ${repoName} start working on ${path} today without asking the author anything?`,
-      {
-        true: "Clear, scoped, and complete enough to begin",
-        false: "Blocked on clarification, a decision, or an external dependency",
-      },
-    );
     questions[questionKey(idx, "urgency")] = score(
       {
         question: `How urgently should maintainers look at ${path}? Consider severity signals, reactions, comments, age_days and whether the problem is spreading.`,
       },
       URGENCY_LEVELS,
+    );
+    questions[questionKey(idx, "action")] = choice(
+      {
+        question: `What is the single next step a maintainer of ${repoName} should take on ${path}?`,
+        notes: [
+          "Judge from the title, body_excerpt, labels, state, comments, reactions, age_days and author_association; the comment thread itself is not shown.",
+          "Where `labeled_examples` carry a next_action, follow that team's conventions.",
+          "If one of candidates_for_duplicate reports the same underlying problem, the next step is close.",
+        ],
+      },
+      actionCriteria,
+    );
+    questions[questionKey(idx, "missing")] = choice(
+      {
+        question: `Suppose a maintainer replies to ${path} asking for more information. What single piece of information matters most?`,
+        notes:
+          "Asked for every issue regardless of whether a reply is needed; answer `none` when the report is already complete enough to act on.",
+      },
+      missingCriteria,
     );
     if (issue.candidates.length > 0) {
       const dupCriteria: Record<string, string | null> = {};
@@ -153,16 +206,16 @@ export function buildQuestions(issues: readonly IssueForTriage[], repo: RepoForT
   return questions as Questions;
 }
 
-export type AnyAnswer = ChoiceResponse | NoulResponse | ScoreResponse;
+export type AnyAnswer = ChoiceResponse | ScoreResponse;
 
 export interface IssueAnswers {
   category?: ChoiceResponse;
   area?: ChoiceResponse;
   severity?: ScoreResponse;
-  needs_info?: NoulResponse;
-  actionable?: NoulResponse;
   urgency?: ScoreResponse;
   duplicate?: ChoiceResponse;
+  action?: ChoiceResponse;
+  missing?: ChoiceResponse;
 }
 
 /** Fold the flat answer map back into per-issue answer records, by batch index. */

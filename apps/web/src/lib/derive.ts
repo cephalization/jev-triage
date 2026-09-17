@@ -12,7 +12,16 @@ import type { CalibrationPair } from "@triage/triage/calibration";
 import { THRESHOLDS, type Thresholds } from "@triage/triage/policy";
 import { logNorm, priority, pullAttention, type PriorityWeights } from "@triage/triage/priority";
 import { assignReviewers, isBot, type Assignment } from "@triage/triage/reviewers";
-import { effortLevel } from "./format.ts";
+import { ACTION_ORDER, effortLevel, MISSING_NAMES, severityLevel } from "./format.ts";
+
+/** The synced triage row, when anyone has claimed the issue or marked it done. */
+export interface TriageStateLike {
+  status: string;
+  claimed_by?: string | null;
+  claimed_at?: number | null;
+  done_by?: string | null;
+  done_at?: number | null;
+}
 
 /** Structural shape of an issue row with its synced relations (see queries.issues.byRepo). */
 export interface IssueInput {
@@ -36,6 +45,7 @@ export interface IssueInput {
   feedback: readonly (FeedbackLike & { id: string })[];
   labels: readonly { id: string; name: string; color: string }[];
   presence: readonly { user_id: string; name: string; color: string; updated_at: number }[];
+  triage?: TriageStateLike | null;
 }
 
 export interface TriageRow<I extends IssueInput = IssueInput> {
@@ -46,26 +56,71 @@ export interface TriageRow<I extends IssueInput = IssueInput> {
   area: string | null;
   severity: number | null;
   urgency: number | null;
-  needsInfo: boolean | null;
-  actionable: boolean | null;
+  /** The maintainer's next step (ACTION_LABELS), a person's if they set one. */
+  action: string | null;
+  actionConfidence: number | null;
+  actionSource: "human" | "model" | "none";
+  /** What a reply should ask for, or null when nothing is missing. */
+  missing: string | null;
   /** Issue id (or "#123" when a human typed a number) of the suggested duplicate. */
   duplicateOf: string | null;
+  /** One line a person can read instead of the glyphs: "Likely bug · blocks a workflow · …". */
+  why: string;
   priority: number;
   needsReview: boolean;
   reviewReasons: string[];
   unclassified: boolean;
   feedbackUsers: string[];
+  /** User id holding the issue, if anyone. */
+  claimedBy: string | null;
+  /** True once someone marked it triaged; it leaves the default list. */
+  done: boolean;
 }
 
 const KIND_LABEL: Record<string, string> = {
   category: "category",
   area: "area",
   severity: "severity",
-  needs_info: "needs info",
-  actionable: "actionable",
   duplicate: "duplicate",
   urgency: "urgency",
+  action: "next step",
+  missing: "missing info",
 };
+
+const SEVERITY_PHRASE = ["", "degraded", "blocks a workflow", "critical impact"] as const;
+
+/** Compose the answers into a sentence; pure so it can be tested and reused in tooltips. */
+export function whyLine(r: {
+  category: string | null;
+  categorySource: "human" | "model" | "none";
+  severity: number | null;
+  urgency: number | null;
+  action: string | null;
+  missing: string | null;
+  duplicateOf: string | null;
+  reactions: number;
+  comments: number;
+  ageDays: number;
+}): string {
+  const parts: string[] = [];
+  if (r.category) {
+    const name = r.category === "question" ? "a question" : r.category;
+    parts.push(r.categorySource === "human" ? capitalize(name) : `Likely ${name}`);
+  }
+  const level = severityLevel(r.severity);
+  if (level !== null && level > 0) parts.push(SEVERITY_PHRASE[level]!);
+  if (r.urgency !== null && r.urgency >= 0.75) parts.push("needs attention now");
+  if (r.action === "ask_author" && r.missing) parts.push(`missing ${MISSING_NAMES[r.missing]}`);
+  if (r.duplicateOf) parts.push("possible duplicate");
+  if (r.reactions > 0) parts.push(`${r.reactions} ${r.reactions === 1 ? "reaction" : "reactions"}`);
+  if (r.comments > 0) parts.push(`${r.comments} ${r.comments === 1 ? "comment" : "comments"}`);
+  if (r.ageDays >= 14) parts.push(`open ${Math.round(r.ageDays)}d`);
+  return parts.join(" · ");
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
 
 export function deriveRows<I extends IssueInput>(
   issues: readonly I[],
@@ -95,8 +150,6 @@ export function deriveRows<I extends IssueInput>(
     );
     const severity = numeric(eff.severity);
     const urgency = numeric(eff.urgency);
-    const needsInfoP = numeric(eff.needs_info);
-    const actionableP = numeric(eff.actionable);
     const reasons: string[] = [];
     if (
       eff.category.source === "model" &&
@@ -106,6 +159,11 @@ export function deriveRows<I extends IssueInput>(
         `category confidence ${(eff.category.confidence ?? 0).toFixed(2)} below ${thresholds.categoryAuto}`,
       );
     }
+    if (eff.action.source === "model" && (eff.action.confidence ?? 0) < thresholds.actionAuto) {
+      reasons.push(
+        `next step unclear: confidence ${(eff.action.confidence ?? 0).toFixed(2)} below ${thresholds.actionAuto}`,
+      );
+    }
     for (const k of CLASSIFICATION_KINDS) {
       if (eff[k].disagreement)
         reasons.push(`human overrode ${KIND_LABEL[k]}: ${eff[k].model?.value} → ${eff[k].value}`);
@@ -113,6 +171,9 @@ export function deriveRows<I extends IssueInput>(
     const dup = eff.duplicate.value && eff.duplicate.value !== "none" ? eff.duplicate.value : null;
     if (dup && eff.duplicate.source === "model") reasons.push("possible duplicate");
     const feedbackUsers = [...new Set(issue.feedback.map((f) => f.user_id))];
+    const action = eff.action.value;
+    const missing = eff.missing.value === "none" ? null : eff.missing.value;
+    const ageDays = (now - issue.created_at) / 86_400_000;
     return {
       issue,
       effective: eff,
@@ -121,9 +182,23 @@ export function deriveRows<I extends IssueInput>(
       area: eff.area.value === "none" ? null : eff.area.value,
       severity,
       urgency,
-      needsInfo: needsInfoP === null ? null : needsInfoP >= thresholds.yes,
-      actionable: actionableP === null ? null : actionableP >= thresholds.yes,
+      action,
+      actionConfidence: eff.action.confidence,
+      actionSource: eff.action.source,
+      missing,
       duplicateOf: dup,
+      why: whyLine({
+        category: eff.category.value,
+        categorySource: eff.category.source,
+        severity,
+        urgency,
+        action,
+        missing,
+        duplicateOf: dup,
+        reactions: issue.reactions,
+        comments: issue.comments,
+        ageDays,
+      }),
       priority: priority(
         {
           severity,
@@ -138,8 +213,40 @@ export function deriveRows<I extends IssueInput>(
       reviewReasons: reasons,
       unclassified: eff.category.source === "none",
       feedbackUsers,
+      claimedBy: issue.triage?.claimed_by ?? null,
+      done: issue.triage?.status === "done",
     };
   });
+}
+
+export interface IssueGroup<I extends IssueInput = IssueInput> {
+  /** An action label, or null for issues the model has not answered yet. */
+  action: string | null;
+  rows: TriageRow<I>[];
+}
+
+/** Sections in ACTION_ORDER, unclassified last, empty sections omitted. Row order is kept. */
+export function groupByAction<I extends IssueInput>(
+  rows: readonly TriageRow<I>[],
+): IssueGroup<I>[] {
+  const buckets = new Map<string | null, TriageRow<I>[]>();
+  for (const r of rows) {
+    const key =
+      r.action && ACTION_ORDER.includes(r.action as (typeof ACTION_ORDER)[number])
+        ? r.action
+        : null;
+    const list = buckets.get(key);
+    if (list) list.push(r);
+    else buckets.set(key, [r]);
+  }
+  const out: IssueGroup<I>[] = [];
+  for (const a of ACTION_ORDER) {
+    const list = buckets.get(a);
+    if (list) out.push({ action: a, rows: list });
+  }
+  const rest = buckets.get(null);
+  if (rest) out.push({ action: null, rows: rest });
+  return out;
 }
 
 export interface PresenceLike {
@@ -177,11 +284,11 @@ export function activeUsers<P extends PresenceLike>(
   return [...byUser.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Confidence vs. agreement pairs for the calibration panel (category and area). */
+/** Confidence vs. agreement pairs for the calibration panel (category, area and next step). */
 export function calibrationPairs(rows: readonly TriageRow[]): CalibrationPair[] {
   const pairs: CalibrationPair[] = [];
   for (const r of rows) {
-    for (const k of ["category", "area"] as const) {
+    for (const k of ["category", "area", "action"] as const) {
       const f = r.effective[k];
       if (f.model && f.human && f.model.confidence != null) {
         pairs.push({ confidence: f.model.confidence, agreed: f.model.value === f.human.value });

@@ -19,6 +19,8 @@ export interface LabeledExample {
   excerpt: string;
   category: string;
   area?: string;
+  /** The team's chosen next action, when a person set one. */
+  action?: string;
 }
 
 export interface DuplicateCandidate {
@@ -41,21 +43,54 @@ export interface IssueForTriage {
   candidates: DuplicateCandidate[];
 }
 
-export const QUESTIONS_VERSION = 1;
+/**
+ * Bump whenever a question changes meaning or a family is added or removed. Every issue is
+ * re-asked at the new version; old rows stay as history.
+ *  v1: category, area, severity, needs_info, actionable, urgency, duplicate
+ *  v2: needs_info and actionable replaced by action (next step) and missing (what to ask for)
+ */
+export const QUESTIONS_VERSION = 2;
 
 export const FAMILIES = [
   "category",
   "area",
   "severity",
-  "needs_info",
-  "actionable",
   "urgency",
   "duplicate",
+  "action",
+  "missing",
 ] as const;
 export type Family = (typeof FAMILIES)[number];
 
 export const CATEGORY_LABELS = ["bug", "feature", "question", "docs", "chore", "other"] as const;
 export type CategoryLabel = (typeof CATEGORY_LABELS)[number];
+
+/**
+ * The single next step a maintainer should take. Mutually exclusive by design: the list is
+ * grouped by this, so an issue must land in exactly one place. `wait` is the no-match outcome.
+ */
+export const ACTION_LABELS = [
+  "ask_author",
+  "answer",
+  "investigate",
+  "decide",
+  "accept",
+  "close",
+  "wait",
+] as const;
+export type ActionLabel = (typeof ACTION_LABELS)[number];
+
+/** What a reply to the author should ask for; `none` when the report is complete. */
+export const MISSING_LABELS = [
+  "repro_steps",
+  "versions",
+  "expected_vs_actual",
+  "minimal_example",
+  "logs_or_error",
+  "concrete_proposal",
+  "none",
+] as const;
+export type MissingLabel = (typeof MISSING_LABELS)[number];
 
 export const SEVERITY_LEVELS = [
   "Cosmetic or trivial: typo, minor visual glitch, no functional impact",

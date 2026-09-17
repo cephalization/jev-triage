@@ -8,6 +8,7 @@ import {
   parseKey,
   questionKey,
 } from "../src/questions.ts";
+import { ACTION_LABELS, MISSING_LABELS } from "../src/types.ts";
 import type { IssueForTriage, RepoForTriage } from "../src/types.ts";
 
 const repo: RepoForTriage = {
@@ -39,6 +40,19 @@ describe("state", () => {
     expect(s.repo.area_labels).toEqual(["cli", "docs-site"]);
   });
 
+  test("labeled examples carry the team's next action only when a person set one", () => {
+    const s = buildState(
+      repo,
+      [
+        { number: 1, title: "a", excerpt: "", category: "bug", action: "close" },
+        { number: 2, title: "b", excerpt: "", category: "docs" },
+      ],
+      [],
+    );
+    expect(s.labeled_examples[0]).toMatchObject({ next_action: "close" });
+    expect(s.labeled_examples[1]).not.toHaveProperty("next_action");
+  });
+
   test("excerpt keeps short text intact", () => {
     expect(excerpt("hello")).toBe("hello");
   });
@@ -61,20 +75,30 @@ describe("questions", () => {
     expect(countQuestions(q)).toBe(5);
   });
 
-  test("every choice has a none/other outcome", () => {
+  test("every choice has a none/other/wait outcome", () => {
     const q = buildQuestions([issue(1, [{ id: "I_9", number: 9, title: "t" }])], repo);
-    const area = q[questionKey(0, "area")] as { criteria: Record<string, unknown> };
-    const dup = q[questionKey(0, "duplicate")] as { criteria: Record<string, unknown> };
-    const cat = q[questionKey(0, "category")] as { criteria: Record<string, unknown> };
-    expect(area.criteria).toHaveProperty("none");
-    expect(dup.criteria).toHaveProperty("none");
-    expect(cat.criteria).toHaveProperty("other");
+    const criteria = (family: Parameters<typeof questionKey>[1]) =>
+      (q[questionKey(0, family)] as { criteria: Record<string, unknown> }).criteria;
+    expect(criteria("area")).toHaveProperty("none");
+    expect(criteria("duplicate")).toHaveProperty("none");
+    expect(criteria("category")).toHaveProperty("other");
+    expect(criteria("missing")).toHaveProperty("none");
+    expect(criteria("action")).toHaveProperty("wait");
+  });
+
+  test("action and missing criteria cover exactly the exported labels", () => {
+    const q = buildQuestions([issue(1)], repo);
+    const keys = (family: Parameters<typeof questionKey>[1]) =>
+      Object.keys((q[questionKey(0, family)] as { criteria: Record<string, unknown> }).criteria);
+    expect(keys("action")).toEqual([...ACTION_LABELS]);
+    expect(keys("missing")).toEqual([...MISSING_LABELS]);
   });
 
   test("keys round-trip", () => {
     expect(parseKey(questionKey(12, "severity"))).toEqual({ index: 12, family: "severity" });
     expect(parseKey("garbage")).toBeNull();
     expect(parseKey("i1__nope")).toBeNull();
+    expect(parseKey("i1__needs_info")).toBeNull();
   });
 
   test("foldAnswers groups by issue and ignores unknown keys", () => {
@@ -86,19 +110,24 @@ describe("questions", () => {
           confidence: 0.9,
           probabilities: { bug: 0.9 },
         },
-        i1__needs_info: { type: "noul", noul: 0.2 },
+        i1__action: {
+          type: "choice",
+          choice: "ask_author",
+          confidence: 0.6,
+          probabilities: { ask_author: 0.6 },
+        },
         i7__category: {
           type: "choice",
           choice: "bug",
           confidence: 0.9,
           probabilities: { bug: 0.9 },
         },
-        junk: { type: "noul", noul: 1 },
+        junk: { type: "choice", choice: "x", confidence: 1, probabilities: { x: 1 } },
       },
       2,
     );
     expect(folded[0]!.category?.choice).toBe("bug");
-    expect(folded[1]!.needs_info?.noul).toBe(0.2);
+    expect(folded[1]!.action?.choice).toBe("ask_author");
     expect(folded[1]!.category).toBeUndefined();
   });
 });

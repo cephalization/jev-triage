@@ -14,7 +14,9 @@ export function createServerMutators(
     feedback: {
       set: defineMutator(feedbackSetArgs, async ({ tx, ctx, args }) => {
         await mutators.feedback.set.fn({ tx, ctx, args });
-        asyncTasks.push(async () => poke(args.repoId, `feedback:${args.kind}`));
+        // A confirmation (reclassify=false) changes nothing the model should redo.
+        if (args.reclassify)
+          asyncTasks.push(async () => poke(args.repoId, `feedback:${args.kind}`));
       }),
     },
     repo: {

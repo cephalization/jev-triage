@@ -1,6 +1,6 @@
-import { defineMutator, defineMutators } from "@rocicorp/zero";
+import { defineMutator, defineMutators, type Transaction } from "@rocicorp/zero";
 import { z } from "zod";
-import { CLASSIFICATION_KINDS, PULL_KINDS, zql } from "./schema.ts";
+import { CLASSIFICATION_KINDS, PULL_KINDS, TRIAGE_STATUSES, zql } from "./schema.ts";
 
 /**
  * Client-safe mutators. They run optimistically in the browser and again on the
@@ -20,6 +20,11 @@ export const feedbackSetArgs = z
     kind: kindSchema,
     value: z.string(),
     note: z.string().optional(),
+    /**
+     * Refresh the model's rows afterwards (the default for a correction). A confirmation of
+     * what the model already said passes false: nothing new to learn for this issue.
+     */
+    reclassify: z.boolean().default(true),
   })
   .refine((a) => (a.issueId === undefined) !== (a.pullId === undefined), {
     message: "feedback needs exactly one of issueId or pullId",
@@ -54,6 +59,51 @@ export const repoRecalculateArgs = z.object({
   pullIds: z.array(z.string()).optional(),
 });
 
+export const triageClaimArgs = z.object({
+  issueId: z.string(),
+  repoId: z.string(),
+  /** true takes the issue (even from someone else); false releases it. */
+  claim: z.boolean(),
+});
+
+export const triageSetStatusArgs = z.object({
+  issueId: z.string(),
+  repoId: z.string(),
+  status: z.enum(TRIAGE_STATUSES),
+});
+
+/** Confirm the model's suggestions as feedback (no reclassification) and leave the queue. */
+export const triageAcceptArgs = z.object({
+  issueId: z.string(),
+  repoId: z.string(),
+  values: z.array(z.object({ id: z.string(), kind: kindSchema, value: z.string() })),
+  done: z.boolean().default(true),
+});
+
+interface TriagePatch {
+  status?: string;
+  claimed_by?: string | null;
+  claimed_at?: number | null;
+  done_by?: string | null;
+  done_at?: number | null;
+}
+
+/** The triage row is created on first touch; later touches merge into it. */
+async function patchTriage(tx: Transaction, issueId: string, repoId: string, patch: TriagePatch) {
+  const existing = await tx.run(zql.triage.where("issue_id", issueId).one());
+  await tx.mutate.triage.upsert({
+    issue_id: issueId,
+    repo_id: repoId,
+    status: existing?.status ?? "open",
+    claimed_by: existing?.claimed_by ?? null,
+    claimed_at: existing?.claimed_at ?? null,
+    done_by: existing?.done_by ?? null,
+    done_at: existing?.done_at ?? null,
+    ...patch,
+    updated_at: Date.now(),
+  });
+}
+
 export const mutators = defineMutators({
   feedback: {
     set: defineMutator(feedbackSetArgs, async ({ tx, ctx, args }) => {
@@ -69,8 +119,56 @@ export const mutators = defineMutators({
         note: args.note ?? null,
         created_at: Date.now(),
       });
+      if (!args.reclassify) return;
       if (args.issueId) await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
       if (args.pullId) await tx.mutate.pull.update({ id: args.pullId, reclassify: true });
+    }),
+  },
+  triage: {
+    claim: defineMutator(triageClaimArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to claim an issue");
+      await patchTriage(
+        tx,
+        args.issueId,
+        args.repoId,
+        args.claim
+          ? { claimed_by: ctx.userID, claimed_at: Date.now() }
+          : { claimed_by: null, claimed_at: null },
+      );
+    }),
+    setStatus: defineMutator(triageSetStatusArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to triage");
+      await patchTriage(
+        tx,
+        args.issueId,
+        args.repoId,
+        args.status === "done"
+          ? { status: "done", done_by: ctx.userID, done_at: Date.now() }
+          : { status: "open", done_by: null, done_at: null },
+      );
+    }),
+    accept: defineMutator(triageAcceptArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to triage");
+      const now = Date.now();
+      for (const v of args.values) {
+        await tx.mutate.feedback.upsert({
+          id: v.id,
+          issue_id: args.issueId,
+          pull_id: null,
+          repo_id: args.repoId,
+          user_id: ctx.userID,
+          kind: v.kind,
+          value: v.value,
+          note: null,
+          created_at: now,
+        });
+      }
+      if (args.done)
+        await patchTriage(tx, args.issueId, args.repoId, {
+          status: "done",
+          done_by: ctx.userID,
+          done_at: now,
+        });
     }),
   },
   presence: {

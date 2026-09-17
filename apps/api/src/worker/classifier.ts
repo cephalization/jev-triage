@@ -176,6 +176,10 @@ export class ClassifierWorker {
       return none;
     }
     const version = Math.max(repo.questions_version, QUESTIONS_VERSION);
+    if (repo.questions_version < version) {
+      // The code's questions changed: bump the repo so every client reads rows at this version.
+      await sql`update repo set questions_version = ${version} where id = ${repoId} and questions_version < ${version}`;
+    }
 
     const issueFilter = sql`
       i.repo_id = ${repoId} and (i.reclassify or not exists (
@@ -426,10 +430,18 @@ export class ClassifierWorker {
 
   async #labeledExamples(repoId: string): Promise<LabeledExample[]> {
     const rows = await sql<
-      { number: number; title: string; body: string; category: string; area: string | null }[]
+      {
+        number: number;
+        title: string;
+        body: string;
+        category: string;
+        area: string | null;
+        action: string | null;
+      }[]
     >`
       select distinct on (f.issue_id) i.number, i.title, i.body, f.value as category,
-        (select a.value from feedback a where a.issue_id = f.issue_id and a.kind = 'area' order by a.created_at desc limit 1) as area
+        (select a.value from feedback a where a.issue_id = f.issue_id and a.kind = 'area' order by a.created_at desc limit 1) as area,
+        (select x.value from feedback x where x.issue_id = f.issue_id and x.kind = 'action' order by x.created_at desc limit 1) as action
       from feedback f join issue i on i.id = f.issue_id
       where f.repo_id = ${repoId} and f.kind = 'category'
       order by f.issue_id, f.created_at desc`;
@@ -442,6 +454,7 @@ export class ClassifierWorker {
         excerpt: r.body.slice(0, 300),
         category: r.category,
         ...(r.area && r.area !== NONE ? { area: r.area } : {}),
+        ...(r.action ? { action: r.action } : {}),
       }));
   }
 
@@ -483,7 +496,9 @@ async function finishRun(
   model: string,
   pendingAfter: number,
 ) {
-  await tx`update repo set tokens_used = tokens_used + ${usage.input_tokens + usage.output_tokens} where id = ${repoId}`;
+  await tx`update repo set tokens_used = tokens_used + ${usage.input_tokens + usage.output_tokens},
+    input_tokens_used = input_tokens_used + ${usage.input_tokens},
+    output_tokens_used = output_tokens_used + ${usage.output_tokens} where id = ${repoId}`;
   await tx`update run set finished_at = now(), status = 'ok', input_tokens = ${usage.input_tokens},
     output_tokens = ${usage.output_tokens}, latency_ms = ${ms}, model = ${model} where id = ${runId}`;
   await tx`update worker_state set pending = ${Math.max(0, pendingAfter)} where repo_id = ${repoId}`;
@@ -559,14 +574,15 @@ export function classificationRows(
       answers.urgency.confidence,
       answers.urgency.probabilities,
     );
-  if (d.needsInfo) {
-    const p = d.needsInfo.probability;
-    push("needs_info", p.toFixed(4), Math.max(p, 1 - p), { true: p, false: 1 - p });
-  }
-  if (d.actionable) {
-    const p = d.actionable.probability;
-    push("actionable", p.toFixed(4), Math.max(p, 1 - p), { true: p, false: 1 - p });
-  }
+  if (answers.action)
+    push("action", answers.action.choice, answers.action.confidence, answers.action.probabilities);
+  if (answers.missing)
+    push(
+      "missing",
+      answers.missing.choice,
+      answers.missing.confidence,
+      answers.missing.probabilities,
+    );
   if (answers.duplicate) {
     const probs: Record<string, number> = {};
     for (const [k, v] of Object.entries(answers.duplicate.probabilities)) {

@@ -62,6 +62,7 @@ export const STATUS = {
 } as const;
 
 export const SEVERITY_NAMES = ["Cosmetic", "Degraded", "Blocking", "Critical"] as const;
+export const URGENCY_NAMES = ["No hurry", "This week", "Now"] as const;
 
 /** 0..1 severity to a rubric level index (0–3), or null. */
 export function severityLevel(s: number | null): number | null {
@@ -76,6 +77,85 @@ export function severityColor(s: number | null): string {
   if (s >= 0.25) return STATUS.warning;
   return STATUS.good;
 }
+
+/**
+ * The maintainer's next step, in the order the triage list shows its sections: things that
+ * need a reply first, then work, then decisions, then housekeeping, then nothing.
+ */
+export interface ActionMeta {
+  /** Section title and select label. */
+  label: string;
+  /** Short pill text in the list. */
+  short: string;
+  /** One line under the section title. */
+  description: string;
+  color: string;
+}
+
+export const ACTION_META: Record<string, ActionMeta> = {
+  ask_author: {
+    label: "Ask the author",
+    short: "Ask",
+    description: "Something is missing before anyone can act. Reply and ask for it.",
+    color: "#eda100",
+  },
+  answer: {
+    label: "Reply with an answer",
+    short: "Answer",
+    description: "A question or misunderstanding. Nothing in the project needs to change.",
+    color: "#1baf7a",
+  },
+  investigate: {
+    label: "Investigate",
+    short: "Investigate",
+    description: "A plausible defect with enough detail to try. Reproduce it.",
+    color: "#2a78d6",
+  },
+  decide: {
+    label: "Needs a decision",
+    short: "Decide",
+    description: "Work cannot start until the team agrees on direction.",
+    color: "#e87ba4",
+  },
+  accept: {
+    label: "Accept into backlog",
+    short: "Accept",
+    description: "Clear and complete. Label it, prioritise it, and it can be picked up.",
+    color: "#2e9e5b",
+  },
+  close: {
+    label: "Close",
+    short: "Close",
+    description: "Resolved, duplicate, out of scope, intended, or spam.",
+    color: "#9a9995",
+  },
+  wait: {
+    label: "Waiting",
+    short: "Wait",
+    description: "The ball is with someone else, or the next step cannot be judged yet.",
+    color: "#6b6f76",
+  },
+};
+
+export const ACTION_ORDER = [
+  "ask_author",
+  "answer",
+  "investigate",
+  "decide",
+  "accept",
+  "close",
+  "wait",
+] as const;
+
+export const MISSING_NAMES: Record<string, string> = {
+  repro_steps: "repro steps",
+  versions: "versions",
+  expected_vs_actual: "expected vs actual",
+  minimal_example: "a minimal example",
+  logs_or_error: "the error or logs",
+  concrete_proposal: "a concrete proposal",
+  none: "nothing",
+};
 
 export const EFFORT_NAMES = ["Trivial", "Small", "Substantial", "Major"] as const;
 

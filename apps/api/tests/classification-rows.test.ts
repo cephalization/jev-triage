@@ -36,7 +36,18 @@ describe("classificationRows", () => {
           legend: {},
           probabilities: { 3: 0.7 },
         },
-        needs_info: { type: "noul", noul: 0.25 },
+        action: {
+          type: "choice",
+          choice: "ask_author",
+          confidence: 0.55,
+          probabilities: { ask_author: 0.55, investigate: 0.3, wait: 0.15 },
+        },
+        missing: {
+          type: "choice",
+          choice: "repro_steps",
+          confidence: 0.8,
+          probabilities: { repro_steps: 0.8, none: 0.2 },
+        },
         duplicate: {
           type: "choice",
           choice: "candidate_0",
@@ -50,11 +61,18 @@ describe("classificationRows", () => {
       "acme/widgets",
     );
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
-    expect(Object.keys(byKind).sort()).toEqual(["category", "duplicate", "needs_info", "severity"]);
+    expect(Object.keys(byKind).sort()).toEqual([
+      "action",
+      "category",
+      "duplicate",
+      "missing",
+      "severity",
+    ]);
     expect(byKind.category!.value).toBe("bug");
     expect(byKind.severity!.value).toBe("1.0000");
-    expect(byKind.needs_info!.value).toBe("0.2500");
-    expect(byKind.needs_info!.confidence).toBeCloseTo(0.75);
+    expect(byKind.action!.value).toBe("ask_author");
+    expect(byKind.action!.confidence).toBe(0.55);
+    expect(byKind.missing!.value).toBe("repro_steps");
     expect(byKind.duplicate!.value).toBe("I_2");
     expect((byKind.duplicate!.probabilities_json as unknown as { value: unknown }).value).toEqual({
       "#2": 0.95,

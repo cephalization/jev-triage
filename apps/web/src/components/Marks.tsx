@@ -1,6 +1,7 @@
 import { cn } from "cn";
 import { Check, CircleAlert, CircleDashed } from "lucide-react";
 import {
+  ACTION_META,
   CATEGORY_COLORS,
   EFFORT_NAMES,
   effortLevel,
@@ -58,7 +59,10 @@ export function ConfidenceRing({
 
 export type IssueStatus = "unclassified" | "classifying" | "model" | "human" | "review";
 
-/** Linear-style status circle: what the system knows about this issue right now. */
+/**
+ * Linear-style status circle. Two states matter to a maintainer: suggested (the ring) and
+ * confirmed by a person (the check). The warning marks a suggestion the model was unsure of.
+ */
 export function StatusIcon({
   status,
   confidence,
@@ -73,9 +77,9 @@ export function StatusIcon({
     {
       unclassified: "Not classified yet",
       classifying: "Classifying…",
-      model: `Model answer · confidence ${pct(confidence)}`,
+      model: `Suggested by the model (confidence ${pct(confidence)})`,
       human: "Confirmed by a person",
-      review: "Needs review",
+      review: "The model was unsure",
     }[status];
   return (
     <Tooltip>
@@ -203,13 +207,12 @@ export function Pill({
   );
 }
 
+/** Category chip. Confirmed values get a check; suggested ones are plain (confidence lives in the panel). */
 export function CategoryChip({
   value,
-  confidence,
   source,
 }: {
   value: string | null;
-  confidence: number | null;
   source: "human" | "model" | "none";
 }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
@@ -217,15 +220,52 @@ export function CategoryChip({
     <Pill
       color={CATEGORY_COLORS[value] ?? "#9a9995"}
       trailing={
-        source === "model" && confidence !== null ? (
-          <span className="text-muted-foreground tabular-nums">{Math.round(confidence * 100)}</span>
-        ) : source === "human" ? (
-          <Check className="size-3 text-status-good" strokeWidth={3} />
-        ) : null
+        source === "human" ? <Check className="size-3 text-status-good" strokeWidth={3} /> : null
       }
     >
       {value}
     </Pill>
+  );
+}
+
+/** The maintainer's next step as a pill; the tooltip carries the why line. */
+export function ActionPill({
+  value,
+  source,
+  hint,
+  className,
+}: {
+  value: string | null;
+  source: "human" | "model" | "none";
+  hint?: string;
+  className?: string;
+}) {
+  const meta = value ? ACTION_META[value] : undefined;
+  if (!meta) return <span className="text-muted-foreground">—</span>;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className={cn("inline-flex", className)}>
+          <Pill
+            color={meta.color}
+            trailing={
+              source === "human" ? (
+                <Check className="size-3 text-status-good" strokeWidth={3} />
+              ) : null
+            }
+          >
+            {meta.short}
+          </Pill>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72">
+        <div className="font-medium">
+          {meta.label}
+          {source === "human" ? " · confirmed" : " · suggested"}
+        </div>
+        {hint && <div className="text-muted-foreground">{hint}</div>}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
