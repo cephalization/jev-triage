@@ -30,6 +30,7 @@ export const repoSetKnobsArgs = z.object({
   cadenceMs: z.number().int().min(250).max(60_000).optional(),
   budgetTokens: z.number().int().min(0).optional(),
   paused: z.boolean().optional(),
+  syncLimit: z.number().int().min(1).max(5000).optional(),
 });
 
 export const repoRecalculateArgs = z.object({
@@ -78,6 +79,7 @@ export const mutators = defineMutators({
         ...(args.cadenceMs !== undefined ? { cadence_ms: args.cadenceMs } : {}),
         ...(args.budgetTokens !== undefined ? { budget_tokens: args.budgetTokens } : {}),
         ...(args.paused !== undefined ? { paused: args.paused } : {}),
+        ...(args.syncLimit !== undefined ? { sync_limit: args.syncLimit } : {}),
       });
     }),
     recalculate: defineMutator(repoRecalculateArgs, async ({ tx, ctx, args }) => {

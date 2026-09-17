@@ -51,6 +51,15 @@ const repo = table("repo")
     sync_cursor: string().optional(),
     sync_status: string(),
     sync_error: string().optional(),
+    sync_phase: string(),
+    sync_fetched: number(),
+    sync_pages: number(),
+    sync_rate_remaining: number().optional(),
+    sync_started_at: number().optional(),
+    sync_message: string().optional(),
+    sync_limit: number(),
+    history_complete: boolean(),
+    history_cursor: string().optional(),
     questions_version: number(),
     batch_size: number(),
     cadence_ms: number(),
@@ -89,6 +98,7 @@ const issue = table("issue")
     closed_at: number().optional(),
     url: string(),
     reclassify: boolean(),
+    classifying: boolean(),
   })
   .primaryKey("id");
 

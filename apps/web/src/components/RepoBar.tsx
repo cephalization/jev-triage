@@ -2,12 +2,11 @@ import { useQuery } from "@rocicorp/zero/react";
 import { queries } from "@triage/schema";
 import { RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { ago, compact } from "../lib/format.ts";
+import { compact } from "../lib/format.ts";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Input } from "./ui/input.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
-import { Switch } from "./ui/switch.tsx";
 
 interface Prices {
   inputPerMTok: number;
@@ -30,6 +29,30 @@ export function costOf(input: number, output: number, prices: Prices | null): st
   return `$${((input * prices.inputPerMTok + output * prices.outputPerMTok) / 1_000_000).toFixed(4)}`;
 }
 
+/** Fire-and-forget: the server answers 202 and progress streams through the repo row. */
+export async function startSync(
+  owner: string,
+  name: string,
+  opts: { paused?: boolean; limit?: number } = {},
+): Promise<string | null> {
+  try {
+    const res = await fetch("/api/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ owner, name, ...opts }),
+    });
+    const data = (await res.json()) as { error?: string };
+    return res.ok ? null : (data.error ?? `sync failed (${res.status})`);
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+export function parseRepoSpec(spec: string): { owner: string; name: string } | null {
+  const m = /^\s*(?:https?:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?\s*$/.exec(spec);
+  return m ? { owner: m[1]!, name: m[2]! } : null;
+}
+
 export function RepoBar({
   repoId,
   onSelect,
@@ -43,49 +66,25 @@ export function RepoBar({
 }) {
   const [repos] = useQuery(queries.repos.all());
   const [repo] = useQuery(repoId ? queries.repos.byId(repoId) : undefined);
-  const [runs] = useQuery(repoId ? queries.runs.byRepo({ repoId, limit: 30 }) : undefined);
-  const prices = usePrices();
   const [target, setTarget] = useState("");
-  const [paused, setPaused] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function sync(spec: string, pausedOnCreate: boolean) {
-    const m = /^\s*(?:https?:\/\/github\.com\/)?([\w.-]+)\/([\w.-]+?)(?:\.git)?\/?\s*$/.exec(spec);
-    if (!m) {
+  async function submit(spec: string) {
+    const parsed = parseRepoSpec(spec);
+    if (!parsed) {
       setError("Use owner/name");
       return;
     }
-    setBusy(true);
     setError(null);
-    onSelect(`${m[1]}/${m[2]}`);
-    try {
-      const res = await fetch("/api/sync", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ owner: m[1], name: m[2], paused: pausedOnCreate }),
-      });
-      const data = (await res.json()) as { error?: string };
-      if (!res.ok) setError(data.error ?? `sync failed (${res.status})`);
-      else setTarget("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    setTarget("");
+    onSelect(`${parsed.owner}/${parsed.name}`);
+    setError(await startSync(parsed.owner, parsed.name));
   }
-
-  const lastClassify = (runs ?? []).find((r) => r.kind === "classify" && r.status === "ok");
-  const totals = (runs ?? []).reduce(
-    (acc, r) => ({ input: acc.input + r.input_tokens, output: acc.output + r.output_tokens }),
-    { input: 0, output: 0 },
-  );
-  const cost = costOf(totals.input, totals.output, prices);
 
   return (
     <div className="flex flex-wrap items-center gap-3 border-b px-4 py-2">
       <Select value={repoId ?? ""} onValueChange={onSelect}>
-        <SelectTrigger className="w-64">
+        <SelectTrigger className="w-60">
           <SelectValue placeholder="Pick a repo" />
         </SelectTrigger>
         <SelectContent>
@@ -100,66 +99,38 @@ export function RepoBar({
         className="flex items-center gap-2"
         onSubmit={(e) => {
           e.preventDefault();
-          void sync(target, paused);
+          void submit(target);
         }}
       >
         <Input
           className="w-56"
-          placeholder="owner/name to add or sync"
+          placeholder="owner/name"
           value={target}
           onChange={(e) => setTarget(e.target.value)}
         />
-        <label className="flex items-center gap-1 text-xs text-muted-foreground">
-          <Switch checked={paused} onCheckedChange={setPaused} /> start paused
-        </label>
-        <Button type="submit" size="sm" disabled={busy || !target.trim()}>
-          <RefreshCw className={busy ? "animate-spin" : ""} /> Sync
+        <Button type="submit" size="sm" disabled={!target.trim()}>
+          Add
         </Button>
       </form>
       {repo && (
         <Button
           size="sm"
           variant="outline"
-          disabled={busy || repo.sync_status === "running"}
-          onClick={() => void sync(repo.id, false)}
+          disabled={repo.sync_status === "running"}
+          onClick={() => void submit(repo.id)}
         >
-          <RefreshCw className={repo.sync_status === "running" ? "animate-spin" : ""} /> Re-sync
+          <RefreshCw className={repo.sync_status === "running" ? "animate-spin" : ""} /> Sync now
         </Button>
       )}
       {error && <span className="text-xs text-destructive">{error}</span>}
       {repo && (
         <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-          <Badge
-            variant={
-              repo.sync_status === "error"
-                ? "destructive"
-                : repo.sync_status === "running"
-                  ? "default"
-                  : "secondary"
-            }
-          >
-            sync {repo.sync_status}
-          </Badge>
-          {repo.sync_error && <span className="text-destructive">{repo.sync_error}</span>}
-          <span>{issueCount} issues</span>
-          <span>{classifiedCount} classified</span>
-          <span>synced {ago(repo.last_synced_at)}</span>
-          <span title={repo.sync_cursor ?? ""}>
-            cursor {repo.sync_cursor ? repo.sync_cursor.slice(0, 10) : "none"}
+          <span className="tabular-nums">
+            {issueCount} issues · {classifiedCount} classified
           </span>
+          <span>cap {repo.sync_limit}</span>
           <span>v{repo.questions_version}</span>
-          {lastClassify && (
-            <span
-              title={`last run: ${lastClassify.issues} issues, ${lastClassify.questions} questions`}
-            >
-              last run {compact(lastClassify.input_tokens)} in /{" "}
-              {compact(lastClassify.output_tokens)} out · {lastClassify.latency_ms} ms ·{" "}
-              {lastClassify.model}
-            </span>
-          )}
-          <span>
-            total {compact(Number(repo.tokens_used))} tokens{cost ? ` · ${cost}` : ""}
-          </span>
+          <span className="tabular-nums">{compact(Number(repo.tokens_used))} tokens</span>
           {repo.paused && <Badge variant="outline">classification paused</Badge>}
         </div>
       )}

@@ -37,12 +37,14 @@ export function Settings({
   const [batch, setBatch] = useState("20");
   const [cadence, setCadence] = useState("2000");
   const [budget, setBudget] = useState("0");
+  const [limit, setLimit] = useState("100");
   useEffect(() => {
     if (!repo) return;
     setBatch(String(repo.batch_size));
     setCadence(String(repo.cadence_ms));
     setBudget(String(repo.budget_tokens));
-  }, [repo?.id, repo?.batch_size, repo?.cadence_ms, repo?.budget_tokens]);
+    setLimit(String(repo.sync_limit));
+  }, [repo?.id, repo?.batch_size, repo?.cadence_ms, repo?.budget_tokens, repo?.sync_limit]);
 
   const ws = repo?.workerState;
   return (
@@ -98,7 +100,7 @@ export function Settings({
                   }
                 />
               </label>
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <div className="flex flex-col gap-1">
                   <Label>Batch size</Label>
                   <Input
@@ -112,6 +114,14 @@ export function Settings({
                   <Input
                     value={cadence}
                     onChange={(e) => setCadence(e.target.value)}
+                    inputMode="numeric"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <Label>Sync cap (issues)</Label>
+                  <Input
+                    value={limit}
+                    onChange={(e) => setLimit(e.target.value)}
                     inputMode="numeric"
                   />
                 </div>
@@ -134,6 +144,7 @@ export function Settings({
                       batchSize: Math.min(50, Math.max(1, Number(batch) || 20)),
                       cadenceMs: Math.min(60_000, Math.max(250, Number(cadence) || 2000)),
                       budgetTokens: Math.max(0, Number(budget) || 0),
+                      syncLimit: Math.min(5000, Math.max(1, Number(limit) || 100)),
                     }),
                   )
                 }

@@ -1,13 +1,14 @@
 import { useQuery } from "@rocicorp/zero/react";
 import { CATEGORIES, queries } from "@triage/schema";
 import { LogOut } from "lucide-react";
-import { useMemo, useState } from "react";
-import { IssueDrawer } from "./components/IssueDrawer.tsx";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { IssuePanel } from "./components/IssuePanel.tsx";
 import { IssueTable, type UserInfo } from "./components/IssueTable.tsx";
 import { OnlineUsers } from "./components/Presence.tsx";
 import { RepoBar } from "./components/RepoBar.tsx";
 import { Settings } from "./components/Settings.tsx";
 import { StatsPanel } from "./components/StatsPanel.tsx";
+import { StatusStrip } from "./components/StatusStrip.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
 import {
@@ -26,6 +27,18 @@ import { useLocalState, useWeights } from "./lib/store.ts";
 
 type StateFilter = "open" | "closed" | "all";
 
+function isTyping(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return (
+    !!t &&
+    (t.tagName === "INPUT" ||
+      t.tagName === "TEXTAREA" ||
+      t.tagName === "SELECT" ||
+      t.isContentEditable ||
+      t.getAttribute("role") === "combobox")
+  );
+}
+
 export function App({ session, onLogout }: { session: Session; onLogout: () => void }) {
   const [repos] = useQuery(queries.repos.all());
   const [{ repoId: storedRepo }, setStoredRepo] = useLocalState<{ repoId: string | null }>(
@@ -33,7 +46,9 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
     { repoId: null },
   );
   const repoId =
-    storedRepo && repos.some((r) => r.id === storedRepo) ? storedRepo : (repos[0]?.id ?? null);
+    storedRepo && repos.some((r) => r.id === storedRepo)
+      ? storedRepo
+      : (repos[0]?.id ?? storedRepo);
   const [repo] = useQuery(repoId ? queries.repos.byId(repoId) : undefined);
   const [users] = useQuery(queries.users.all());
   const [stateFilter, setStateFilter] = useState<StateFilter>("open");
@@ -41,7 +56,7 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
   const [category, setCategory] = useState("all");
   const [reviewOnly, setReviewOnly] = useState(false);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" }>({
-    key: "priority",
+    key: "updated",
     dir: "desc",
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -83,6 +98,8 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
   );
   const numberToId = useMemo(() => new Map((issues ?? []).map((i) => [i.number, i.id])), [issues]);
   const areaLabels = useMemo(() => (repo?.labels ?? []).map((l) => l.name).sort(), [repo?.labels]);
+  const visible = tab === "review" ? reviewRows : filtered;
+  const loading = !!repoId && issuesResult?.type !== "complete" && (issues ?? []).length === 0;
 
   const onSort = (key: SortKey) =>
     setSort((s) =>
@@ -91,12 +108,53 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
         : { key, dir: key === "number" || key === "category" ? "asc" : "desc" },
     );
 
+  // Keyboard: j/k move, Enter opens, Esc closes. The panel itself handles 1–6.
+  const move = useCallback(
+    (delta: number) => {
+      if (visible.length === 0) return;
+      const idx = visible.findIndex((r) => r.issue.id === selectedId);
+      const next =
+        idx < 0
+          ? delta > 0
+            ? 0
+            : visible.length - 1
+          : Math.min(visible.length - 1, Math.max(0, idx + delta));
+      const id = visible[next]!.issue.id;
+      setSelectedId(id);
+      document.querySelector(`[data-issue-id="${id}"]`)?.scrollIntoView({ block: "nearest" });
+    },
+    [visible, selectedId],
+  );
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === "Escape") {
+        (document.activeElement as HTMLElement | null)?.blur();
+        setSelectedId(null);
+        return;
+      }
+      if (isTyping(e)) return;
+      if (e.key === "j" || e.key === "ArrowDown") {
+        e.preventDefault();
+        move(1);
+      } else if (e.key === "k" || e.key === "ArrowUp") {
+        e.preventDefault();
+        move(-1);
+      } else if (e.key === "/") {
+        e.preventDefault();
+        document.querySelector<HTMLInputElement>("input[data-search]")?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [move]);
+
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex h-screen flex-col overflow-hidden">
       <header className="flex items-center gap-4 border-b px-4 py-2">
         <h1 className="text-base font-semibold">typeful-triage</h1>
-        <span className="text-xs text-muted-foreground">
-          {issuesResult?.type === "complete" ? "synced" : "syncing…"}
+        <span className="hidden text-xs text-muted-foreground sm:inline">
+          j/k move · Enter open · Esc close · 1–6 category · / search
         </span>
         <div className="ml-auto flex items-center gap-4">
           <OnlineUsers selfId={session.user.userID} onOpenIssue={setSelectedId} />
@@ -112,19 +170,21 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
         issueCount={rows.length}
         classifiedCount={rows.filter((r) => !r.unclassified).length}
       />
-      <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col">
+      <StatusStrip repoId={repoId} now={now} />
+      <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col gap-0">
         <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2">
           <TabsList>
             <TabsTrigger value="triage">Triage</TabsTrigger>
-            <TabsTrigger value="review">Review queue ({reviewRows.length})</TabsTrigger>
+            <TabsTrigger value="review">Review ({reviewRows.length})</TabsTrigger>
             <TabsTrigger value="stats">Stats</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
           </TabsList>
           {(tab === "triage" || tab === "review") && (
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <Input
+                data-search
                 className="w-56"
-                placeholder="Search title or body (server-side ILIKE)"
+                placeholder="Search  /"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
@@ -162,55 +222,67 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
             </div>
           )}
         </div>
-        <TabsContent value="triage" className="min-h-0 flex-1 overflow-auto">
-          <IssueTable
-            rows={filtered}
-            users={userMap}
-            now={now}
-            sort={sort}
-            onSort={onSort}
-            onOpen={setSelectedId}
-            selectedId={selectedId}
-            numberToId={numberToId}
-          />
-        </TabsContent>
-        <TabsContent value="review" className="min-h-0 flex-1 overflow-auto">
-          <p className="px-4 pt-3 text-xs text-muted-foreground">
-            Lowest confidence first. Items land here when the model is unsure, when a human
-            disagreed, or when a duplicate is suspected.
-          </p>
-          <IssueTable
-            rows={reviewRows}
-            users={userMap}
-            now={now}
-            sort={{ key: "confidence", dir: "asc" }}
-            onSort={() => {}}
-            onOpen={setSelectedId}
-            selectedId={selectedId}
-            numberToId={numberToId}
-          />
-        </TabsContent>
-        <TabsContent value="stats">
-          <StatsPanel repoId={repoId} rows={rows} />
-        </TabsContent>
-        <TabsContent value="settings">
-          <Settings
-            repoId={repoId}
-            weights={weights}
-            setWeights={setWeights}
-            visibleIssueIds={filtered.map((r) => r.issue.id)}
-            now={now}
-          />
-        </TabsContent>
+        <div className="flex min-h-0 flex-1">
+          <div className="min-w-0 flex-1 overflow-auto">
+            <TabsContent value="triage" className="m-0">
+              <IssueTable
+                rows={filtered}
+                users={userMap}
+                now={now}
+                sort={sort}
+                onSort={onSort}
+                onOpen={setSelectedId}
+                selectedId={selectedId}
+                numberToId={numberToId}
+                loading={loading}
+                emptyText={repoId ? "No issues match." : "Add a repo above to start."}
+              />
+            </TabsContent>
+            <TabsContent value="review" className="m-0">
+              <p className="px-4 pt-3 text-xs text-muted-foreground">
+                Lowest confidence first: the model was unsure, a human disagreed, or a duplicate is
+                suspected.
+              </p>
+              <IssueTable
+                rows={reviewRows}
+                users={userMap}
+                now={now}
+                sort={{ key: "confidence", dir: "asc" }}
+                onSort={() => {}}
+                onOpen={setSelectedId}
+                selectedId={selectedId}
+                numberToId={numberToId}
+                loading={loading}
+                emptyText="Review queue is empty."
+              />
+            </TabsContent>
+            <TabsContent value="stats" className="m-0">
+              <StatsPanel repoId={repoId} rows={rows} />
+            </TabsContent>
+            <TabsContent value="settings" className="m-0">
+              <Settings
+                repoId={repoId}
+                weights={weights}
+                setWeights={setWeights}
+                visibleIssueIds={filtered.map((r) => r.issue.id)}
+                now={now}
+              />
+            </TabsContent>
+          </div>
+          {selectedId && (tab === "triage" || tab === "review") && (
+            <div className="w-[44%] min-w-[26rem] max-w-[44rem] shrink-0">
+              <IssuePanel
+                issueId={selectedId}
+                questionsVersion={version}
+                areaLabels={areaLabels}
+                numberToId={numberToId}
+                onClose={() => setSelectedId(null)}
+                now={now}
+              />
+            </div>
+          )}
+        </div>
       </Tabs>
-      <IssueDrawer
-        issueId={selectedId}
-        questionsVersion={version}
-        areaLabels={areaLabels}
-        numberToId={numberToId}
-        onClose={() => setSelectedId(null)}
-        now={now}
-      />
     </div>
   );
 }

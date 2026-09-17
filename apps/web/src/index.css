@@ -110,3 +110,27 @@
     @apply bg-background text-foreground;
   }
 }
+
+@keyframes slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+@keyframes fade-in-row {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.row-enter {
+  animation: fade-in-row 180ms ease-out;
+}

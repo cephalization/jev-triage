@@ -16,9 +16,18 @@ create table if not exists repo (
   default_branch text not null default 'main',
   open_issues integer not null default 0,
   last_synced_at timestamptz,
-  sync_cursor text,                    -- ISO "since" for incremental sync
+  sync_cursor text,                    -- newest updated_at stored; re-syncs walk newest-first down to it
   sync_status text not null default 'idle',   -- idle | running | error
   sync_error text,
+  sync_phase text not null default 'idle',    -- idle | recent | history | capped | done | error
+  sync_fetched integer not null default 0,    -- issues stored by the current/last run
+  sync_pages integer not null default 0,
+  sync_rate_remaining integer,
+  sync_started_at timestamptz,
+  sync_message text,
+  sync_limit integer not null default 100,    -- max issues to keep while testing
+  history_complete boolean not null default false,
+  history_cursor text,                        -- oldest updated_at stored so far
   questions_version integer not null default 1,
   batch_size integer not null default 20,
   cadence_ms integer not null default 2000,
@@ -53,7 +62,8 @@ create table if not exists issue (
   updated_at timestamptz not null,
   closed_at timestamptz,
   url text not null default '',
-  reclassify boolean not null default false
+  reclassify boolean not null default false,
+  classifying boolean not null default false  -- in the batch currently in flight
 );
 create index if not exists issue_repo_updated_idx on issue(repo_id, updated_at desc);
 create index if not exists issue_title_trgm_idx on issue using gin (title gin_trgm_ops);

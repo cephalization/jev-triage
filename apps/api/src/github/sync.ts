@@ -3,10 +3,22 @@ import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 
 /**
- * Incremental GitHub → Postgres sync. One page per transaction so clients watching
- * through Zero see progress live. `repo.sync_cursor` is the max `updated_at` seen,
- * fetched in ascending order so a crash mid-way resumes correctly.
+ * GitHub → Postgres sync, newest first.
+ *
+ * Walks `issues.listForRepo` sorted by `updated` descending, one page per transaction, so the
+ * most recently touched issues land (and get classified) within a second or two.
+ *
+ *  - recent phase: everything updated in the last year, or down to the previous high-water
+ *    mark (`repo.sync_cursor`) on a re-sync;
+ *  - history phase: anything older, fetched slowly (one page every HISTORY_PAGE_DELAY_MS) so it
+ *    never competes with the live parts; resumable via `repo.history_cursor`;
+ *  - `repo.sync_limit` caps the number of issues kept (testing knob; default 100).
+ *
+ * Progress lives on the repo row (`sync_phase`, `sync_fetched`, ...) and streams to clients.
  */
+
+const YEAR_MS = 365 * 86_400_000;
+const HISTORY_PAGE_DELAY_MS = 4_000;
 
 type ThrottleOptions = { method: string; url: string };
 
@@ -17,8 +29,13 @@ export interface SyncResult {
   pages: number;
   issues: number;
   skippedPulls: number;
-  cursor: string | null;
+  phase: string;
 }
+
+export type SyncHooks = {
+  /** Called after each stored page so classification can start immediately. */
+  onPage?: (repoId: string, stored: number) => void;
+};
 
 function makeOctokit() {
   return new Octokit({
@@ -48,11 +65,21 @@ function makeOctokit() {
   });
 }
 
-export function syncRepo(owner: string, name: string, paused = false): Promise<SyncResult> {
+export function isSyncing(repoId: string): boolean {
+  return inFlight.has(repoId);
+}
+
+/** Starts (or joins) a sync. Resolves when the whole run, including history, is done. */
+export function syncRepo(
+  owner: string,
+  name: string,
+  hooks: SyncHooks = {},
+  opts: { paused?: boolean; limit?: number } = {},
+): Promise<SyncResult> {
   const id = `${owner}/${name}`;
   const existing = inFlight.get(id);
   if (existing) return existing;
-  const p = runSync(owner, name, paused).finally(() => inFlight.delete(id));
+  const p = runSync(owner, name, hooks, opts).finally(() => inFlight.delete(id));
   inFlight.set(id, p);
   return p;
 }
@@ -84,101 +111,189 @@ type IssueItem = {
   pull_request?: unknown;
 };
 
-async function runSync(owner: string, name: string, paused: boolean): Promise<SyncResult> {
+type Phase = "recent" | "history";
+
+async function progress(repoId: string, fields: Record<string, unknown>) {
+  const cols = Object.keys(fields);
+  if (cols.length === 0) return;
+  await sql`update repo set ${sql(fields, ...cols)} where id = ${repoId}`;
+}
+
+async function runSync(
+  owner: string,
+  name: string,
+  hooks: SyncHooks,
+  opts: { paused?: boolean; limit?: number },
+): Promise<SyncResult> {
   const repoId = `${owner}/${name}`;
   const octokit = makeOctokit();
   const runId = newId();
   const started = Date.now();
   let pages = 0;
-  let issues = 0;
+  let stored = 0;
   let skippedPulls = 0;
+  let phase: Phase = "recent";
+  let finalPhase = "done";
 
   const { data: meta } = await octokit.rest.repos.get({ owner, repo: name });
   await sql`
-    insert into repo (id, owner, name, description, default_branch, open_issues, sync_status, sync_error, paused)
-    values (${repoId}, ${owner}, ${name}, ${meta.description ?? null}, ${meta.default_branch}, ${meta.open_issues_count}, 'running', null, ${paused})
+    insert into repo (id, owner, name, description, default_branch, open_issues, sync_status, sync_error, paused, sync_limit,
+      sync_phase, sync_fetched, sync_pages, sync_started_at, sync_message)
+    values (${repoId}, ${owner}, ${name}, ${meta.description ?? null}, ${meta.default_branch}, ${meta.open_issues_count}, 'running', null,
+      ${opts.paused ?? false}, ${opts.limit ?? 100}, 'recent', 0, 0, now(), 'fetching newest issues')
     on conflict (id) do update set description = excluded.description, default_branch = excluded.default_branch,
-      open_issues = excluded.open_issues, sync_status = 'running', sync_error = null`;
+      open_issues = excluded.open_issues, sync_status = 'running', sync_error = null, sync_phase = 'recent',
+      sync_fetched = 0, sync_pages = 0, sync_started_at = now(), sync_message = 'fetching newest issues'`;
   await sql`insert into worker_state (repo_id) values (${repoId}) on conflict do nothing`;
   await sql`insert into run (id, repo_id, kind, status) values (${runId}, ${repoId}, 'sync', 'running')`;
 
   try {
-    const labels = await octokit.paginate(octokit.rest.issues.listLabelsForRepo, {
-      owner,
-      repo: name,
-      per_page: 100,
-    });
-    if (labels.length > 0) {
-      await sql`
-        insert into label ${sql(
-          labels.map((l) => ({
-            id: l.node_id,
-            repo_id: repoId,
-            name: l.name,
-            color: l.color ?? "",
-            description: l.description ?? null,
-          })),
-          "id",
-          "repo_id",
-          "name",
-          "color",
-          "description",
-        )}
-        on conflict (id) do update set name = excluded.name, color = excluded.color, description = excluded.description`;
-    }
+    const repoRows = await sql<
+      {
+        sync_cursor: string | null;
+        sync_limit: number;
+        history_complete: boolean;
+        history_cursor: string | null;
+      }[]
+    >`
+      select sync_cursor, sync_limit, history_complete, history_cursor from repo where id = ${repoId}`;
+    const repo = repoRows[0]!;
+    const highWater = repo.sync_cursor;
+    const limit = repo.sync_limit;
+    const yearAgo = new Date(started - YEAR_MS).toISOString();
+    let newestSeen: string | null = null;
+    let oldestSeen: string | null = repo.history_cursor;
+    let historyDone = repo.history_complete;
 
-    const cursorRows = await sql<{ sync_cursor: string | null }[]>`
-      select sync_cursor from repo where id = ${repoId}`;
-    const cursor = cursorRows[0]?.sync_cursor ?? null;
-    let maxUpdated = cursor;
+    await syncLabels(octokit, owner, name, repoId);
+    const existing = new Set(
+      (await sql<{ id: string }[]>`select id from issue where repo_id = ${repoId}`).map(
+        (r) => r.id,
+      ),
+    );
+    let total = existing.size;
+    let capped = total >= limit;
 
     const iterator = octokit.paginate.iterator(octokit.rest.issues.listForRepo, {
       owner,
       repo: name,
       state: "all",
       sort: "updated",
-      direction: "asc",
+      direction: "desc",
       per_page: 100,
-      ...(cursor ? { since: cursor } : {}),
     });
 
-    for await (const page of iterator) {
+    walk: for await (const page of iterator) {
       pages += 1;
       const remaining = Number(page.headers["x-ratelimit-remaining"] ?? "1000");
       const reset = Number(page.headers["x-ratelimit-reset"] ?? "0") * 1000;
-      const items = (page.data as IssueItem[]).filter((i) => {
-        if (i.pull_request) {
+      const toStore: IssueItem[] = [];
+      let reachedKnown = false;
+      for (const raw of page.data as IssueItem[]) {
+        if (raw.pull_request) {
           skippedPulls += 1;
-          return false;
+          continue;
         }
-        return true;
-      });
-      if (items.length > 0) {
-        await upsertPage(repoId, items);
-        issues += items.length;
-        for (const i of items)
-          if (!maxUpdated || i.updated_at > maxUpdated) maxUpdated = i.updated_at;
+        if (!newestSeen) newestSeen = raw.updated_at;
+        const known = existing.has(raw.node_id);
+        if (phase === "recent" && highWater && raw.updated_at <= highWater) {
+          // From here down everything was stored by an earlier run.
+          reachedKnown = true;
+          if (historyDone) break;
+          if (oldestSeen && raw.updated_at >= oldestSeen) continue;
+          phase = "history";
+        }
+        if (phase === "recent" && !highWater && raw.updated_at < yearAgo) phase = "history";
+        if (!known && total >= limit) {
+          // The cap only limits new issues; updates to stored issues always apply.
+          capped = true;
+          continue;
+        }
+        toStore.push(raw);
+        if (!known) {
+          existing.add(raw.node_id);
+          total += 1;
+        }
       }
-      await sql`update repo set sync_cursor = ${maxUpdated}, last_synced_at = now() where id = ${repoId}`;
+
+      if (toStore.length > 0) {
+        await upsertPage(repoId, toStore);
+        stored += toStore.length;
+        const oldest = toStore[toStore.length - 1]!.updated_at;
+        if (!oldestSeen || oldest < oldestSeen) oldestSeen = oldest;
+        hooks.onPage?.(repoId, toStore.length);
+      }
+      await progress(repoId, {
+        sync_phase: phase,
+        sync_fetched: stored,
+        sync_pages: pages,
+        sync_rate_remaining: remaining,
+        history_cursor: oldestSeen,
+        last_synced_at: new Date(),
+        sync_message:
+          phase === "recent"
+            ? `fetching newest issues · page ${pages}`
+            : `backfilling history · page ${pages} · one page every ${HISTORY_PAGE_DELAY_MS / 1000}s`,
+      });
       console.log(
-        `[sync] ${repoId} page ${pages}: ${items.length} issues (rate limit remaining ${remaining})`,
+        `[sync] ${repoId} ${phase} page ${pages}: stored ${toStore.length} (total ${total}/${limit}, rate ${remaining})`,
       );
+
+      if (capped) {
+        finalPhase = "capped";
+        // Keep walking only while there may be fresh updates to stored issues ahead.
+        if (reachedKnown || !highWater) break walk;
+      }
+      if (reachedKnown && historyDone) break walk;
       if (remaining < 5 && reset > Date.now()) {
         const wait = reset - Date.now() + 1000;
-        console.warn(`[sync] ${repoId} near rate limit; sleeping ${Math.round(wait / 1000)}s`);
+        await progress(repoId, {
+          sync_message: `rate limited · resuming in ${Math.round(wait / 1000)}s`,
+        });
         await new Promise((r) => setTimeout(r, wait));
+      } else if (phase === "history") {
+        await new Promise((r) => setTimeout(r, HISTORY_PAGE_DELAY_MS));
       }
     }
+    if (finalPhase !== "capped") historyDone = true;
 
-    await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now() where id = ${repoId}`;
-    await sql`update run set finished_at = now(), status = 'ok', issues = ${issues}, latency_ms = ${Date.now() - started} where id = ${runId}`;
-    return { repoId, pages, issues, skippedPulls, cursor: maxUpdated };
+    await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now(),
+      sync_cursor = ${newestSeen ?? highWater}, history_complete = ${historyDone}, history_cursor = ${oldestSeen},
+      sync_phase = ${finalPhase}, sync_message = ${finalPhase === "capped" ? `capped at ${limit} issues` : "up to date"}
+      where id = ${repoId}`;
+    await sql`update run set finished_at = now(), status = 'ok', issues = ${stored}, latency_ms = ${Date.now() - started} where id = ${runId}`;
+    return { repoId, pages, issues: stored, skippedPulls, phase: finalPhase };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    await sql`update repo set sync_status = 'error', sync_error = ${message} where id = ${repoId}`;
-    await sql`update run set finished_at = now(), status = 'error', error = ${message}, issues = ${issues}, latency_ms = ${Date.now() - started} where id = ${runId}`;
+    await sql`update repo set sync_status = 'error', sync_error = ${message}, sync_phase = 'error', sync_message = ${message} where id = ${repoId}`;
+    await sql`update run set finished_at = now(), status = 'error', error = ${message}, issues = ${stored}, latency_ms = ${Date.now() - started} where id = ${runId}`;
     throw e;
   }
+}
+
+async function syncLabels(octokit: Octokit, owner: string, name: string, repoId: string) {
+  const labels = await octokit.paginate(octokit.rest.issues.listLabelsForRepo, {
+    owner,
+    repo: name,
+    per_page: 100,
+  });
+  if (labels.length === 0) return;
+  await sql`
+    insert into label ${sql(
+      labels.map((l) => ({
+        id: l.node_id,
+        repo_id: repoId,
+        name: l.name,
+        color: l.color ?? "",
+        description: l.description ?? null,
+      })),
+      "id",
+      "repo_id",
+      "name",
+      "color",
+      "description",
+    )}
+    on conflict (id) do update set name = excluded.name, color = excluded.color, description = excluded.description`;
 }
 
 async function upsertPage(repoId: string, items: IssueItem[]) {

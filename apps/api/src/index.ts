@@ -5,7 +5,7 @@ import { z } from "zod";
 import { colorFor, mintToken, userIdFor } from "./auth.ts";
 import { sql } from "./db.ts";
 import { env } from "./env.ts";
-import { syncRepo } from "./github/sync.ts";
+import { isSyncing, syncRepo } from "./github/sync.ts";
 import { ClassifierWorker } from "./worker/classifier.ts";
 import { TypeSafeSystemOne } from "./worker/typesafe.ts";
 import { zeroRoutes } from "./zero/routes.ts";
@@ -52,19 +52,25 @@ const syncBody = z.object({
   name: z.string().trim().min(1),
   /** Create the repo with classification paused (cost control for big repos). */
   paused: z.boolean().optional(),
+  /** Max issues to keep (testing knob; default 100). */
+  limit: z.number().int().min(1).max(5000).optional(),
 });
 app.post("/api/sync", async (c) => {
   const parsed = syncBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "owner and name required" }, 400);
-  const { owner, name, paused } = parsed.data;
-  try {
-    const result = await syncRepo(owner, name, paused ?? false);
-    poke(result.repoId, "sync");
-    return c.json(result);
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    return c.json({ error: message }, 502);
-  }
+  const { owner, name, paused, limit } = parsed.data;
+  const repoId = `${owner}/${name}`;
+  if (isSyncing(repoId)) return c.json({ ok: true, repoId, status: "already running" }, 202);
+  // Fire and forget: progress streams through the repo row; classification starts per page.
+  syncRepo(owner, name, { onPage: (id) => poke(id, "sync page") }, { paused, limit })
+    .then((r) => {
+      console.log(
+        `[sync] ${r.repoId} finished: ${r.issues} issues in ${r.pages} pages (${r.phase})`,
+      );
+      poke(r.repoId, "sync done");
+    })
+    .catch((e) => console.error(`[sync] ${repoId} failed:`, e instanceof Error ? e.message : e));
+  return c.json({ ok: true, repoId, status: "started" }, 202);
 });
 
 app.post("/api/classify/poke", async (c) => {

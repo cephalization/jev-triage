@@ -27,6 +27,7 @@ export interface IssueInput {
   closed_at: number | null;
   url: string;
   reclassify: boolean;
+  classifying: boolean;
   classifications: readonly ClassificationLike[];
   feedback: readonly (FeedbackLike & { id: string })[];
   labels: readonly { id: string; name: string; color: string }[];

@@ -18,6 +18,7 @@ const base = (n: number, over: Partial<IssueInput> = {}): IssueInput => ({
   closed_at: null,
   url: "",
   reclassify: false,
+  classifying: false,
   classifications: [],
   feedback: [],
   labels: [],

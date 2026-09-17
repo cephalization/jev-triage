@@ -62,6 +62,8 @@ export class ClassifierWorker {
     this.#systemOne = systemOne;
   }
 
+  readonly #seed = new Map<string, { runs: number; dropped: number; coalesced: number }>();
+
   poke(repoId: string, reason: string): void {
     let s = this.#schedulers.get(repoId);
     if (!s) {
@@ -70,6 +72,8 @@ export class ClassifierWorker {
         COLLECT_MS,
         (stats) => void this.#persistStats(repoId, stats),
       );
+      const seed = this.#seed.get(repoId);
+      if (seed) Object.assign(s.stats, seed);
       this.#schedulers.set(repoId, s);
     }
     console.log(`[worker] poke ${repoId} (${reason})`);
@@ -77,6 +81,17 @@ export class ClassifierWorker {
   }
 
   async pokeAllWithPendingWork(): Promise<void> {
+    await sql`update issue set classifying = false where classifying`;
+    // Counters survive restarts: seed in-memory stats from the last persisted values.
+    const states = await sql<
+      { repo_id: string; requests: number; dropped_triggers: number; coalesced_triggers: number }[]
+    >`select repo_id, requests, dropped_triggers, coalesced_triggers from worker_state`;
+    for (const w of states)
+      this.#seed.set(w.repo_id, {
+        runs: w.requests,
+        dropped: w.dropped_triggers,
+        coalesced: w.coalesced_triggers,
+      });
     const repos = await sql<{ id: string }[]>`select id from repo where paused = false`;
     for (const r of repos) this.poke(r.id, "startup");
   }
@@ -160,6 +175,8 @@ export class ClassifierWorker {
 
     const runId = newId();
     await sql`insert into run (id, repo_id, kind, status, issues, questions) values (${runId}, ${repoId}, 'classify', 'running', ${issues.length}, ${questionCount})`;
+    const batchIds = issues.map((i) => i.id);
+    await sql`update issue set classifying = true where id in ${sql(batchIds)}`;
     const t0 = Date.now();
     try {
       const result = await this.#systemOne.ask(state, questions);
@@ -189,7 +206,7 @@ export class ClassifierWorker {
             "run_id",
           )}`;
         }
-        await tx`update issue set reclassify = false where id in ${tx(issues.map((i) => i.id))}`;
+        await tx`update issue set reclassify = false, classifying = false where id in ${tx(batchIds)}`;
         await tx`update repo set tokens_used = tokens_used + ${usage.input_tokens + usage.output_tokens} where id = ${repoId}`;
         await tx`update run set finished_at = now(), status = 'ok', input_tokens = ${usage.input_tokens},
           output_tokens = ${usage.output_tokens}, latency_ms = ${ms}, model = ${result.model} where id = ${runId}`;
@@ -200,6 +217,7 @@ export class ClassifierWorker {
       const message = e instanceof Error ? e.message : String(e);
       console.error(`[worker] ${repoId} request failed: ${message}`);
       await sql`update run set finished_at = now(), status = 'error', error = ${message}, latency_ms = ${Date.now() - t0} where id = ${runId}`;
+      await sql`update issue set classifying = false where id in ${sql(batchIds)}`;
       await this.#setError(repoId, message, pending);
       return none;
     }

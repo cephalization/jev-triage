@@ -24,6 +24,8 @@ export function IssueTable({
   onOpen,
   selectedId,
   numberToId,
+  loading = false,
+  emptyText = "Nothing here.",
 }: {
   rows: TriageRow[];
   users: Map<string, UserInfo>;
@@ -33,6 +35,8 @@ export function IssueTable({
   onOpen: (id: string) => void;
   selectedId: string | null;
   numberToId: Map<number, string>;
+  loading?: boolean;
+  emptyText?: string;
 }) {
   const Head = ({
     k,
@@ -84,10 +88,21 @@ export function IssueTable({
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.length === 0 && (
+        {rows.length === 0 && loading && (
+          <>
+            {Array.from({ length: 8 }, (_, i) => (
+              <TableRow key={i}>
+                <TableCell colSpan={9} className="py-3">
+                  <div className="h-4 w-2/3 animate-pulse rounded bg-muted" />
+                </TableCell>
+              </TableRow>
+            ))}
+          </>
+        )}
+        {rows.length === 0 && !loading && (
           <TableRow>
             <TableCell colSpan={9} className="py-10 text-center text-muted-foreground">
-              Nothing here.
+              {emptyText}
             </TableCell>
           </TableRow>
         )}
@@ -99,7 +114,11 @@ export function IssueTable({
           return (
             <TableRow
               key={r.issue.id}
-              className={cn("cursor-pointer", selectedId === r.issue.id && "bg-accent")}
+              className={cn(
+                "row-enter cursor-pointer transition-colors",
+                selectedId === r.issue.id && "bg-accent",
+              )}
+              data-issue-id={r.issue.id}
               onClick={() => onOpen(r.issue.id)}
               data-state={selectedId === r.issue.id ? "selected" : undefined}
             >
@@ -118,11 +137,17 @@ export function IssueTable({
                 </div>
               </TableCell>
               <TableCell>
-                <CategoryChip
-                  value={r.category}
-                  confidence={r.categoryConfidence}
-                  source={r.effective.category.source}
-                />
+                {r.issue.classifying && r.unclassified ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-dashed px-2 py-0.5 text-xs text-muted-foreground">
+                    <span className="size-2 animate-pulse rounded-full bg-[#2a78d6]" /> classifying
+                  </span>
+                ) : (
+                  <CategoryChip
+                    value={r.category}
+                    confidence={r.categoryConfidence}
+                    source={r.effective.category.source}
+                  />
+                )}
               </TableCell>
               <TableCell className="text-xs">
                 {r.area ?? <span className="text-muted-foreground">—</span>}
