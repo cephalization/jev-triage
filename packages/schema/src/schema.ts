@@ -14,7 +14,14 @@ export type ZeroContext = {
   userID: string;
   name: string;
   color: string;
+  /** GitHub login, as GitHub spells it. */
+  login: string;
+  role: Role;
+  avatarUrl: string | null;
 };
+
+export const ROLES = ["member", "admin"] as const;
+export type Role = (typeof ROLES)[number];
 
 /**
  * Families asked about issues (questions v2). `action` is the maintainer's next step and
@@ -48,9 +55,27 @@ const user = table("user")
     id: string(),
     name: string(),
     color: string(),
+    login: string().optional(),
+    github_id: number().optional(),
+    avatar_url: string().optional(),
+    role: string(),
+    last_login_at: number().optional(),
     created_at: number(),
   })
   .primaryKey("id");
+
+/** Allowlist: a GitHub login that may sign in, and the role it gets. Lowercased. */
+const invite = table("invite")
+  .columns({
+    login: string(),
+    role: string(),
+    invited_by: string().optional(),
+    note: string().optional(),
+    created_at: number(),
+    accepted_at: number().optional(),
+    accepted_by: string().optional(),
+  })
+  .primaryKey("login");
 
 const repo = table("repo")
   .columns({
@@ -303,6 +328,10 @@ const issueRelationships = relationships(issue, ({ many, one }) => ({
   ),
 }));
 
+const inviteRelationships = relationships(invite, ({ one }) => ({
+  inviter: one({ sourceField: ["invited_by"], destSchema: user, destField: ["id"] }),
+}));
+
 const triageRelationships = relationships(triage, ({ one }) => ({
   issue: one({ sourceField: ["issue_id"], destSchema: issue, destField: ["id"] }),
   claimer: one({ sourceField: ["claimed_by"], destSchema: user, destField: ["id"] }),
@@ -336,6 +365,7 @@ const presenceRelationships = relationships(presence, ({ one }) => ({
 export const schema = createSchema({
   tables: [
     user,
+    invite,
     repo,
     label,
     issue,
@@ -352,6 +382,7 @@ export const schema = createSchema({
   ],
   relationships: [
     repoRelationships,
+    inviteRelationships,
     issueRelationships,
     triageRelationships,
     pullRelationships,

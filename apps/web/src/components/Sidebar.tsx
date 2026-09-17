@@ -180,6 +180,7 @@ export function Sidebar({
               <Avatar
                 name={session.user.name}
                 color={session.user.color}
+                src={session.user.avatarUrl}
                 size="md"
                 className="ring-sidebar"
               />
@@ -188,6 +189,11 @@ export function Sidebar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+              {session.user.login ? `@${session.user.login}` : session.user.name} ·{" "}
+              {session.user.role}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
             <DropdownMenuLabel className="text-xs text-muted-foreground">Theme</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={theme} onValueChange={(v) => setTheme(v as Theme)}>
               <DropdownMenuRadioItem value="system">

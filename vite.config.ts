@@ -18,6 +18,8 @@ export default defineConfig({
         cache: false,
       },
       migrate: { command: "vp run @triage/api#migrate", cache: false },
+      emulate: { command: "vp run @triage/api#emulate", cache: false },
+      "dev:emulate": { command: "node scripts/dev.mjs --emulate", cache: false },
       typecheck: { command: "tsc -b", cache: true },
     },
   },

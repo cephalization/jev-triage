@@ -26,6 +26,14 @@ export const queries = defineQueries({
   users: {
     all: defineQuery(() => zql.user.orderBy("name", "asc")),
   },
+  invites: {
+    /** The allowlist is for admins; everyone else gets an empty result from the server. */
+    all: defineQuery(({ ctx }) =>
+      ctx?.role === "admin"
+        ? zql.invite.orderBy("created_at", "desc").related("inviter")
+        : zql.invite.where("login", "=", ""),
+    ),
+  },
   repos: {
     all: defineQuery(() => zql.repo.orderBy("id", "asc").related("workerState")),
     byId: defineQuery(z.string(), ({ args: id }) =>

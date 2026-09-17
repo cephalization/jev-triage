@@ -636,6 +636,7 @@ export function App({
             )}
             {view === "system" && (
               <SystemPanel
+                session={session}
                 repoId={repoId}
                 rows={rows}
                 weights={weights}

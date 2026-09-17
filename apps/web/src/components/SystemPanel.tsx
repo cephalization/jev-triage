@@ -5,6 +5,8 @@ import { THRESHOLDS } from "@triage/triage/policy";
 import type { PriorityWeights } from "@triage/triage/priority";
 import { useEffect, useMemo, useState } from "react";
 import { costOf, pokeWorker, usePrices } from "../lib/api.ts";
+import type { Session } from "../lib/auth.ts";
+import { People } from "./People.tsx";
 import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
 import { Columns, Legend } from "./Charts.tsx";
@@ -54,6 +56,7 @@ function Section({
 
 /** Operator-facing: how the model and worker are doing, what they cost, and the knobs. */
 export function SystemPanel({
+  session,
   repoId,
   rows,
   weights,
@@ -61,6 +64,7 @@ export function SystemPanel({
   visibleIssueIds,
   now,
 }: {
+  session: Session;
   repoId: string | null;
   rows: TriageRow[];
   weights: PriorityWeights;
@@ -117,6 +121,14 @@ export function SystemPanel({
   const cal = calibrate(pairs, 5);
   const ece = expectedCalibrationError(cal);
   const ws = repo?.workerState;
+  const [adminLogins, setAdminLogins] = useState<string[]>([]);
+  useEffect(() => {
+    if (session.user.role !== "admin") return;
+    fetch("/api/auth/admins", { headers: { authorization: `Bearer ${session.token}` } })
+      .then((r) => (r.ok ? r.json() : { logins: [] }))
+      .then((d: { logins: string[] }) => setAdminLogins(d.logins))
+      .catch(() => setAdminLogins([]));
+  }, [session]);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col divide-y p-6">
@@ -155,6 +167,15 @@ export function SystemPanel({
           sub={`${pairs.length} model vs human pairs`}
         />
       </div>
+
+      {session.user.role === "admin" && (
+        <Section
+          title="People"
+          description="Who can sign in. Invite a GitHub login and choose a role; removing an invite stops the next sign-in."
+        >
+          <People session={session} adminLogins={adminLogins} now={now} />
+        </Section>
+      )}
 
       <Section
         title="Classification"

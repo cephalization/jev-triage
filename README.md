@@ -49,9 +49,37 @@ vp install
 vp run dev               # postgres (docker) + migrations + api + zero-cache + web
 ```
 
-Open http://localhost:5173, sign in with any name (development auth), open the repository
-switcher and add `owner/name`. Issues sync newest first and get their suggestions within a few
-seconds. Open the app in a second window under another name to see presence and claims.
+Open http://localhost:5173, sign in with GitHub, open the repository switcher and add
+`owner/name`. Issues sync newest first and get their suggestions within a few seconds.
+
+## Signing in
+
+Access is invite only. Set `ADMIN_GITHUB_LOGINS` in `.env` to your GitHub login; admins listed
+there can always sign in and can invite other GitHub accounts from System → People, choosing a
+role for each. Two ways in:
+
+- **Continue with GitHub**: create a GitHub OAuth app whose callback is
+  `APP_URL/api/auth/github/callback` (`http://localhost:5173/api/auth/github/callback` locally)
+  and put its id and secret in `.env`.
+- **A GitHub token**: paste a personal access token on the login page. It is used once to look
+  up your login and is not stored. This is also how agents and scripts sign in
+  (`POST /api/auth/token {"token"}`).
+
+### Without a GitHub account
+
+For offline or agent-driven development, start everything with sign-in pointed at the
+emulate.dev GitHub emulator instead of github.com:
+
+```sh
+vp run dev:emulate
+```
+
+That runs the normal stack plus the emulator (seeded from `emulate.config.yaml` on port 4001)
+and makes `admin` an admin. Sign in with the token `gho_test_token_admin`, or through
+"Continue with GitHub", which shows a user picker instead of a password. Repository sync still
+uses real GitHub, so real repositories work as usual. The API's auth tests start the emulator
+in-process. The pieces are also available separately: `vp run emulate` starts only the emulator,
+and the `GITHUB_*_URL` variables in `.env.example` do the pointing by hand.
 
 The Postgres container listens on port 5433 so it does not clash with a local install. Change
 `ZERO_UPSTREAM_DB` in `.env` and the port mapping in `docker-compose.yml` together if you need
@@ -64,8 +92,12 @@ Everything lives in `.env`, which is never committed. See `.env.example` for the
 | Variable                         | Purpose                                                        |
 | -------------------------------- | -------------------------------------------------------------- |
 | `TYPESAFE_API_KEY`               | Classification. Without it the app syncs but never classifies. |
-| `GITHUB_TOKEN`                   | Pull request sync (GraphQL) and higher rate limits. Optional.  |
-| `AUTH_SECRET`                    | Signs the development login tokens.                            |
+| `GITHUB_TOKEN`                   | Server token for pull request sync and higher rate limits.     |
+| `AUTH_SECRET`                    | Signs session tokens.                                          |
+| `ADMIN_GITHUB_LOGINS`            | Comma-separated GitHub logins that are always admins.          |
+| `GITHUB_CLIENT_ID` / `_SECRET`   | The GitHub OAuth app for "Continue with GitHub".               |
+| `APP_URL`                        | Where the browser reaches the app; builds the OAuth callback.  |
+| `GITHUB_API_URL` / `_OAUTH_URL`  | Default github.com; point both at an emulator for offline use. |
 | `TYPESAFE_PRICE_INPUT_PER_MTOK`  | Price per million input tokens, shown as spend. Preset.        |
 | `TYPESAFE_PRICE_OUTPUT_PER_MTOK` | Price per million output tokens. Preset.                       |
 

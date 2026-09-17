@@ -1,6 +1,6 @@
 import { defineMutator, defineMutators, type Transaction } from "@rocicorp/zero";
 import { z } from "zod";
-import { CLASSIFICATION_KINDS, PULL_KINDS, TRIAGE_STATUSES, zql } from "./schema.ts";
+import { CLASSIFICATION_KINDS, PULL_KINDS, ROLES, TRIAGE_STATUSES, zql } from "./schema.ts";
 
 /**
  * Client-safe mutators. They run optimistically in the browser and again on the
@@ -58,6 +58,18 @@ export const repoRecalculateArgs = z.object({
   issueIds: z.array(z.string()).optional(),
   pullIds: z.array(z.string()).optional(),
 });
+
+/** GitHub logins are 1–39 chars of alphanumerics and single hyphens. */
+export const inviteAddArgs = z.object({
+  login: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/, "not a GitHub login"),
+  role: z.enum(ROLES).default("member"),
+  note: z.string().trim().max(200).optional(),
+});
+
+export const inviteRemoveArgs = z.object({ login: z.string().trim().min(1) });
 
 export const triageClaimArgs = z.object({
   issueId: z.string(),
@@ -122,6 +134,26 @@ export const mutators = defineMutators({
       if (!args.reclassify) return;
       if (args.issueId) await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
       if (args.pullId) await tx.mutate.pull.update({ id: args.pullId, reclassify: true });
+    }),
+  },
+  invite: {
+    add: defineMutator(inviteAddArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can invite");
+      const login = args.login.toLowerCase();
+      const existing = await tx.run(zql.invite.where("login", login).one());
+      await tx.mutate.invite.upsert({
+        login,
+        role: args.role,
+        invited_by: existing?.invited_by ?? ctx.userID,
+        note: args.note ?? existing?.note ?? null,
+        created_at: existing?.created_at ?? Date.now(),
+        accepted_at: existing?.accepted_at ?? null,
+        accepted_by: existing?.accepted_by ?? null,
+      });
+    }),
+    remove: defineMutator(inviteRemoveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can remove invites");
+      await tx.mutate.invite.delete({ login: args.login.toLowerCase() });
     }),
   },
   triage: {

@@ -1,0 +1,25 @@
+# Seed for the emulate.dev GitHub emulator (`vp run emulate` starts it on port 4001).
+# With GITHUB_API_URL and GITHUB_OAUTH_URL pointed at it, sign in with one of these tokens or
+# through the emulated OAuth page. Pair with ADMIN_GITHUB_LOGINS=admin in .env.
+tokens:
+  gho_test_token_admin:
+    login: admin
+    scopes: [read:user, repo]
+  gho_test_token_octocat:
+    login: octocat
+    scopes: [read:user]
+github:
+  users:
+    - login: admin
+      name: Admin
+    - login: octocat
+      name: The Octocat
+  oauth_apps:
+    - client_id: emulated-client-id
+      client_secret: emulated-client-secret
+      name: typeful-triage (local)
+      redirect_uris:
+        - http://localhost:5173/api/auth/github/callback
+  repos:
+    - owner: octocat
+      name: hello-world

@@ -43,6 +43,7 @@ export type SyncHooks = {
 function makeOctokit() {
   return new Octokit({
     auth: env.githubToken ?? undefined,
+    baseUrl: env.githubSyncApiUrl,
     throttle: {
       onRateLimit: (
         retryAfter: number,
