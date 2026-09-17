@@ -156,8 +156,10 @@ const feedback = table("feedback")
   })
   .primaryKey("id");
 
+/** One row per browser tab (client_id lives in sessionStorage); group by user_id in the UI. */
 const presence = table("presence")
   .columns({
+    client_id: string(),
     user_id: string(),
     name: string(),
     color: string(),
@@ -165,7 +167,7 @@ const presence = table("presence")
     issue_id: string().optional(),
     updated_at: number(),
   })
-  .primaryKey("user_id");
+  .primaryKey("client_id");
 
 const workerState = table("worker_state")
   .columns({

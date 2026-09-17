@@ -138,6 +138,41 @@ export function deriveRows<I extends IssueInput>(
   });
 }
 
+export interface PresenceLike {
+  user_id: string;
+  name: string;
+  color: string;
+  issue_id?: string | null;
+  updated_at: number;
+}
+
+/**
+ * Presence rows are per tab; collapse them to one entry per user, keeping the freshest row
+ * and, for the "viewing" hint, the freshest row that names an issue.
+ */
+export function activeUsers<P extends PresenceLike>(
+  rows: readonly P[],
+  now: number,
+  ttlMs: number,
+): (P & { issue_id: string | null })[] {
+  const byUser = new Map<string, P & { issue_id: string | null }>();
+  for (const row of rows) {
+    if (row.updated_at <= now - ttlMs) continue;
+    const prev = byUser.get(row.user_id);
+    if (!prev) {
+      byUser.set(row.user_id, { ...row, issue_id: row.issue_id ?? null });
+      continue;
+    }
+    const issue = row.issue_id ?? null;
+    const prefer = issue && (!prev.issue_id || row.updated_at > prev.updated_at);
+    byUser.set(row.user_id, {
+      ...(row.updated_at > prev.updated_at ? row : prev),
+      issue_id: prefer ? issue : prev.issue_id,
+    });
+  }
+  return [...byUser.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** Confidence vs. agreement pairs for the calibration panel (category and area). */
 export function calibrationPairs(rows: readonly TriageRow[]): CalibrationPair[] {
   const pairs: CalibrationPair[] = [];

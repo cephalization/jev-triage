@@ -25,14 +25,20 @@ export function zeroRoutes(poke: (repoId: string, reason: string) => void) {
 
   app.post("/api/mutate", async (c) => {
     const ctx = await contextFromRequest(c.req.raw);
+    if (!ctx) console.warn("[mutate] request without a valid token; mutators will refuse writes");
     const asyncTasks: Array<() => Promise<void>> = [];
     const serverMutators = createServerMutators(asyncTasks, poke);
     const result = await handleMutateRequest({
       dbProvider,
       handler: (transact) =>
-        transact((tx, name, args) => {
+        transact(async (tx, name, args) => {
           const mutator = mustGetMutator(serverMutators, name);
-          return mutator.fn({ tx, ctx, args });
+          try {
+            await mutator.fn({ tx, ctx, args });
+          } catch (e) {
+            console.warn(`[mutate] ${name} failed:`, e instanceof Error ? e.message : e);
+            throw e;
+          }
         }),
       request: c.req.raw,
       userID: ctx?.userID,

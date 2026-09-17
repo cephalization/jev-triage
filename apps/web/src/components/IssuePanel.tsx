@@ -11,7 +11,7 @@ import { SEVERITY_LEVELS, URGENCY_LEVELS } from "@triage/triage/types";
 import { ExternalLink, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ago, CATEGORY_COLORS, pct, SEVERITY_NAMES, severityColor } from "../lib/format.ts";
-import { PRESENCE_TTL_MS } from "../lib/presence.ts";
+import { viewersOf } from "../lib/presence.ts";
 import { Avatar } from "./Avatar.tsx";
 import { CategoryChip, Pill, ProbStrip, StatusIcon } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
@@ -163,7 +163,7 @@ export function IssuePanel({
     human: "Confirmed by a person",
     model: `Model · ${pct(eff.category.confidence)} confident`,
   }[status];
-  const viewers = issue.presence.filter((p) => p.updated_at > now - PRESENCE_TTL_MS);
+  const viewers = viewersOf(issue.presence, now);
 
   return (
     <aside className="flex h-full min-h-0 flex-col border-l bg-background">

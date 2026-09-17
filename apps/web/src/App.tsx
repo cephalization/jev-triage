@@ -49,7 +49,16 @@ function isTyping(e: KeyboardEvent): boolean {
   );
 }
 
-export function App({ session, onLogout }: { session: Session; onLogout: () => void }) {
+export function App({
+  session,
+  onLogout,
+  onSessionRejected,
+}: {
+  session: Session;
+  onLogout: () => void;
+  /** A server-rejected write: re-verify the token and sign out if it is dead. */
+  onSessionRejected: (error: unknown) => void;
+}) {
   const [repos] = useQuery(queries.repos.all());
   const [{ repoId: storedRepo }, setStoredRepo] = useLocalState<{ repoId: string | null }>(
     "typeful-triage.repo",
@@ -75,7 +84,7 @@ export function App({ session, onLogout }: { session: Session; onLogout: () => v
   const [weights, setWeights] = useWeights();
   const [theme, setTheme] = useTheme();
   const now = useNow();
-  usePresenceHeartbeat(repoId, selectedId);
+  usePresenceHeartbeat(repoId, selectedId, onSessionRejected);
 
   const [issues, issuesResult] = useQuery(
     repoId ? queries.issues.byRepo({ repoId, state: stateFilter, search, limit: 500 }) : undefined,

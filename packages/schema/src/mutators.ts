@@ -20,9 +20,14 @@ export const feedbackSetArgs = z.object({
 });
 
 export const presenceHeartbeatArgs = z.object({
+  /** Per-tab id; two tabs of one user are two rows, so they never overwrite each other. */
+  clientId: z.string().min(1).max(64),
   repoId: z.string().nullable(),
   issueId: z.string().nullable(),
 });
+
+/** Rows older than this are deleted by whichever heartbeat sees them. */
+export const PRESENCE_PRUNE_MS = 10 * 60_000;
 
 export const repoSetKnobsArgs = z.object({
   repoId: z.string(),
@@ -59,15 +64,22 @@ export const mutators = defineMutators({
   },
   presence: {
     heartbeat: defineMutator(presenceHeartbeatArgs, async ({ tx, ctx, args }) => {
-      if (!ctx) return;
+      // Throwing (rather than silently skipping) lets the client notice a dead session:
+      // otherwise the optimistic row appears, the server writes nothing, and it vanishes.
+      if (!ctx) throw new Error("Sign in to share presence");
+      const now = Date.now();
       await tx.mutate.presence.upsert({
+        client_id: args.clientId,
         user_id: ctx.userID,
         name: ctx.name,
         color: ctx.color,
         repo_id: args.repoId,
         issue_id: args.issueId,
-        updated_at: Date.now(),
+        updated_at: now,
       });
+      // Tabs that closed never say goodbye; sweep what has gone quiet.
+      const stale = await tx.run(zql.presence.where("updated_at", "<", now - PRESENCE_PRUNE_MS));
+      for (const row of stale) await tx.mutate.presence.delete({ client_id: row.client_id });
     }),
   },
   repo: {

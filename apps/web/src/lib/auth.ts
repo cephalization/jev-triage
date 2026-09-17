@@ -39,3 +39,14 @@ export async function devLogin(name: string): Promise<Session> {
   saveSession(data);
   return data;
 }
+
+/** True when the API still accepts this token; null when the API cannot be reached. */
+export async function verifySession(s: Session): Promise<boolean | null> {
+  try {
+    const res = await fetch("/api/auth/me", { headers: { authorization: `Bearer ${s.token}` } });
+    if (res.status === 401) return false;
+    return res.ok ? true : null;
+  } catch {
+    return null;
+  }
+}

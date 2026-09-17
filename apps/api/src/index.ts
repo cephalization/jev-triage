@@ -2,7 +2,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
-import { colorFor, mintToken, userIdFor } from "./auth.ts";
+import { colorFor, contextFromRequest, mintToken, userIdFor } from "./auth.ts";
 import { sql } from "./db.ts";
 import { env } from "./env.ts";
 import { isSyncing, syncRepo } from "./github/sync.ts";
@@ -45,6 +45,13 @@ app.post("/api/auth/dev", async (c) => {
     on conflict (id) do update set name = excluded.name`;
   const token = await mintToken({ userID, name, color });
   return c.json({ token, user: { userID, name, color } });
+});
+
+/** Lets the client check a stored token before trusting it (secrets rotate, tokens expire). */
+app.get("/api/auth/me", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "invalid or expired token" }, 401);
+  return c.json({ user: ctx });
 });
 
 const syncBody = z.object({

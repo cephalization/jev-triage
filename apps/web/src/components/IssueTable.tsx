@@ -2,7 +2,7 @@ import { cn } from "cn";
 import { ArrowDown, ArrowUp, CircleHelp, Copy, MessageSquare } from "lucide-react";
 import type { SortKey, TriageRow } from "../lib/derive.ts";
 import { agoShort } from "../lib/format.ts";
-import { PRESENCE_TTL_MS } from "../lib/presence.ts";
+import { viewersOf } from "../lib/presence.ts";
 import { AvatarStack } from "./Avatar.tsx";
 import { CategoryChip, Pill, PriorityBars, SeverityMark, StatusIcon } from "./Marks.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
@@ -130,7 +130,7 @@ export function IssueTable({
           </tr>
         )}
         {rows.map((r) => {
-          const viewers = r.issue.presence.filter((p) => p.updated_at > now - PRESENCE_TTL_MS);
+          const viewers = viewersOf(r.issue.presence, now);
           const feedbackPeople = r.feedbackUsers
             .map((id) => users.get(id))
             .filter((u): u is UserInfo => !!u);

@@ -1,6 +1,6 @@
 import { DEFAULT_WEIGHTS } from "@triage/triage/priority";
 import { describe, expect, test } from "vite-plus/test";
-import { calibrationPairs, deriveRows, sortRows, type IssueInput } from "./derive.ts";
+import { activeUsers, calibrationPairs, deriveRows, sortRows, type IssueInput } from "./derive.ts";
 
 const base = (n: number, over: Partial<IssueInput> = {}): IssueInput => ({
   id: `I_${n}`,
@@ -87,5 +87,37 @@ describe("deriveRows", () => {
       DEFAULT_WEIGHTS,
     );
     expect(calibrationPairs(rows)).toEqual([{ confidence: 0.7, agreed: true }]);
+  });
+});
+
+describe("activeUsers", () => {
+  const p = (user: string, updated_at: number, issue_id: string | null = null) => ({
+    client_id: `${user}-${updated_at}`,
+    user_id: user,
+    name: user,
+    color: "#000",
+    issue_id,
+    updated_at,
+  });
+
+  test("drops stale rows and collapses tabs to one entry per user", () => {
+    const out = activeUsers([p("bob", 100), p("bob", 90, "I1"), p("old", 10)], 120, 45);
+    expect(out.map((u) => u.user_id)).toEqual(["bob"]);
+    expect(out[0]!.updated_at).toBe(100);
+  });
+
+  test("keeps the issue a user has open in any tab", () => {
+    expect(activeUsers([p("bob", 100), p("bob", 90, "I1")], 120, 45)[0]!.issue_id).toBe("I1");
+    expect(activeUsers([p("bob", 90), p("bob", 100, "I2")], 120, 45)[0]!.issue_id).toBe("I2");
+    expect(activeUsers([p("bob", 100, "I1"), p("bob", 110, "I2")], 120, 45)[0]!.issue_id).toBe(
+      "I2",
+    );
+  });
+
+  test("sorts by name", () => {
+    expect(activeUsers([p("zed", 100), p("amy", 100)], 120, 45).map((u) => u.name)).toEqual([
+      "amy",
+      "zed",
+    ]);
   });
 });
