@@ -1,8 +1,8 @@
 import { ZeroProvider } from "@rocicorp/zero/react";
+import { RouterProvider } from "@tanstack/react-router";
 import { mutators, schema } from "@triage/schema";
-import { StrictMode, useCallback, useEffect, useState } from "react";
+import { StrictMode, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { App } from "./App.tsx";
 import { Login } from "./components/Login.tsx";
 import { TooltipProvider } from "./components/ui/tooltip.tsx";
 import {
@@ -14,6 +14,7 @@ import {
   type Session,
 } from "./lib/auth.ts";
 import { applyTheme, loadTheme } from "./lib/theme.ts";
+import { makeRouter } from "./router.tsx";
 import "./index.css";
 
 const CACHE_URL =
@@ -79,10 +80,20 @@ function Root() {
       kvStore="idb"
     >
       <TooltipProvider delayDuration={300}>
-        <App session={session} onLogout={logout} onSessionRejected={recheck} />
+        <Routed session={session} logout={logout} onSessionRejected={recheck} />
       </TooltipProvider>
     </ZeroProvider>
   );
+}
+
+/** One router per session; its context carries who is signed in and how to sign out. */
+function Routed(props: {
+  session: Session;
+  logout: () => void;
+  onSessionRejected: (error: unknown) => void;
+}) {
+  const router = useMemo(() => makeRouter(props), [props.session.token]);
+  return <RouterProvider router={router} context={props} />;
 }
 
 createRoot(document.getElementById("root")!).render(

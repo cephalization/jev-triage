@@ -79,7 +79,8 @@ export function takeAuthFragment(): { token?: string; error?: string; login?: st
     error: p.get("auth_error") ?? undefined,
     login: p.get("login") ?? undefined,
   };
-  if (out.token || out.error) history.replaceState(null, "", window.location.pathname);
+  if (out.token || out.error)
+    history.replaceState(null, "", window.location.pathname + window.location.search);
   return out;
 }
 

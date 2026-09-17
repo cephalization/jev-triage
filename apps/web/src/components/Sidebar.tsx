@@ -1,4 +1,5 @@
 import { useQuery } from "@rocicorp/zero/react";
+import { Link, useLocation, useNavigate } from "@tanstack/react-router";
 import { queries } from "@triage/schema";
 import { cn } from "cn";
 import {
@@ -46,7 +47,7 @@ import {
 import { Input } from "./ui/input.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
-export type View = "triage" | "unsure" | "pulls" | "repo" | "system";
+import { VIEW_PATH, type View } from "../router.tsx";
 
 const NAV: { id: View; label: string; icon: typeof Inbox; key: string }[] = [
   { id: "triage", label: "Triage", icon: Inbox, key: "g t" },
@@ -59,11 +60,8 @@ const NAV: { id: View; label: string; icon: typeof Inbox; key: string }[] = [
 export function Sidebar({
   session,
   repoId,
-  onSelectRepo,
-  view,
-  onView,
   counts,
-  onOpenIssue,
+  onNavigate,
   onLogout,
   theme,
   setTheme,
@@ -71,11 +69,9 @@ export function Sidebar({
 }: {
   session: Session;
   repoId: string | null;
-  onSelectRepo: (id: string) => void;
-  view: View;
-  onView: (v: View) => void;
   counts: Partial<Record<View, number>>;
-  onOpenIssue: (id: string) => void;
+  /** Called after any navigation so the mobile sheet can close. */
+  onNavigate: () => void;
   onLogout: () => void;
   theme: Theme;
   setTheme: (t: Theme) => void;
@@ -85,6 +81,24 @@ export function Sidebar({
   const [repo] = useQuery(repoId ? queries.repos.byId(repoId) : undefined);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const pathname = useLocation({ select: (l) => l.pathname });
+  const view = (pathname.split("/")[1] || "triage") as View;
+  const listPath = VIEW_PATH[view in VIEW_PATH ? view : "triage"];
+
+  /** Switching repository stays on the current view with its filters, but drops any open item. */
+  const onSelectRepo = (id: string) => {
+    void navigate({ to: listPath, search: (s) => ({ ...s, repo: id }) });
+    onNavigate();
+  };
+  const onOpenIssue = (id: string) => {
+    void navigate({
+      to: "/triage/$issueId",
+      params: { issueId: id },
+      search: (s) => ({ repo: s.repo }),
+    });
+    onNavigate();
+  };
 
   async function sync(spec: string) {
     const parsed = parseRepoSpec(spec);
@@ -147,11 +161,12 @@ export function Sidebar({
         {NAV.map((n) => {
           const count = counts[n.id];
           return (
-            <button
+            <Link
               key={n.id}
-              type="button"
-              data-active={view === n.id || undefined}
-              onClick={() => onView(n.id)}
+              to={VIEW_PATH[n.id]}
+              search={(s) => ({ repo: s.repo })}
+              onClick={onNavigate}
+              activeProps={{ "data-active": true }}
               className="flex h-7 items-center gap-2 rounded-md px-2 text-left text-foreground/80 hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none data-active:bg-sidebar-accent data-active:text-foreground"
             >
               <n.icon className="size-3.5 shrink-0 text-muted-foreground" />
@@ -159,7 +174,7 @@ export function Sidebar({
               {count !== undefined && count > 0 && (
                 <span className="text-xs text-muted-foreground tabular-nums">{count}</span>
               )}
-            </button>
+            </Link>
           );
         })}
       </nav>

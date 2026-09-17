@@ -5,6 +5,7 @@ packages:
 catalogMode: prefer
 
 catalog:
+  "@tanstack/react-router": ^1.170.36
   "@types/node": ^24
   cn: ^0.3.0
   emulate: ^0.11.2
