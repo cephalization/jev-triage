@@ -4,3 +4,5 @@ export * from "./policy.ts";
 export * from "./decide.ts";
 export * from "./priority.ts";
 export * from "./calibration.ts";
+export * from "./pulls.ts";
+export * from "./reviewers.ts";

@@ -2,6 +2,8 @@ import { cn } from "cn";
 import { Check, CircleAlert, CircleDashed } from "lucide-react";
 import {
   CATEGORY_COLORS,
+  EFFORT_NAMES,
+  effortLevel,
   pct,
   SEVERITY_NAMES,
   severityColor,
@@ -261,5 +263,73 @@ export function ProbStrip({
         ))}
       </div>
     </div>
+  );
+}
+
+/** Review effort as a colored dot plus the rubric level name (same scale as severity). */
+export function EffortMark({
+  value,
+  labelClassName,
+}: {
+  value: number | null;
+  labelClassName?: string;
+}) {
+  const level = effortLevel(value);
+  if (level === null) return <span className="text-muted-foreground">—</span>;
+  const name = EFFORT_NAMES[level]!;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex items-center gap-1.5">
+          <span
+            className="size-2 shrink-0 rounded-full"
+            style={{ backgroundColor: severityColor(value) }}
+          />
+          <span className={labelClassName}>{name}</span>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>
+        {name} · review effort {pct(value)}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Where a pull request stands with reviewers: approved, changes requested, or waiting. */
+export function ReviewDecisionMark({
+  decision,
+  draft,
+  hasReviews,
+}: {
+  decision: string | null;
+  draft: boolean;
+  hasReviews: boolean;
+}) {
+  const [label, node] = draft
+    ? ["Draft", <CircleDashed key="d" className="size-3.5 text-muted-foreground" />]
+    : decision === "APPROVED"
+      ? [
+          "Approved",
+          <span
+            key="a"
+            className="inline-flex size-3.5 items-center justify-center rounded-full bg-status-good text-white"
+          >
+            <Check className="size-2.5" strokeWidth={3} />
+          </span>,
+        ]
+      : decision === "CHANGES_REQUESTED"
+        ? ["Changes requested", <CircleAlert key="c" className="size-3.5 text-status-serious" />]
+        : hasReviews
+          ? ["In review", <ConfidenceRing key="r" value={0.5} className="text-primary" />]
+          : ["Awaiting review", <ConfidenceRing key="w" value={0} className="text-primary" />];
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex size-4 items-center justify-center" aria-label={label}>
+          {node}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }

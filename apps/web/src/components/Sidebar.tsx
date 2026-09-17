@@ -6,6 +6,7 @@ import {
   Check,
   ChevronsUpDown,
   CircleAlert,
+  GitPullRequest,
   Inbox,
   LogOut,
   Monitor,
@@ -45,11 +46,12 @@ import {
 import { Input } from "./ui/input.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 
-export type View = "triage" | "review" | "stats" | "settings";
+export type View = "triage" | "review" | "pulls" | "stats" | "settings";
 
 const NAV: { id: View; label: string; icon: typeof Inbox; key: string }[] = [
   { id: "triage", label: "Triage", icon: Inbox, key: "g t" },
   { id: "review", label: "Review", icon: CircleAlert, key: "g r" },
+  { id: "pulls", label: "Pull requests", icon: GitPullRequest, key: "g p" },
   { id: "stats", label: "Stats", icon: ChartColumn, key: "g s" },
   { id: "settings", label: "Settings", icon: SettingsIcon, key: "g ," },
 ];
@@ -262,7 +264,8 @@ function AddRepoDialog({
           <DialogHeader>
             <DialogTitle>Add repository</DialogTitle>
             <DialogDescription>
-              Issues sync newest first and classify as they land. The cap lives in Settings.
+              Issues and pull requests sync newest first and classify as they land. Caps live in
+              Settings.
             </DialogDescription>
           </DialogHeader>
           <Input

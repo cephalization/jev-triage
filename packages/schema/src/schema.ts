@@ -27,6 +27,10 @@ export const CLASSIFICATION_KINDS = [
 ] as const;
 export type ClassificationKind = (typeof CLASSIFICATION_KINDS)[number];
 
+/** Families asked about pull requests; stored in the same classification/feedback tables. */
+export const PULL_KINDS = ["review_effort", "reviewer"] as const;
+export type PullKind = (typeof PULL_KINDS)[number];
+
 export const CATEGORIES = ["bug", "feature", "question", "docs", "chore", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
 
@@ -60,6 +64,9 @@ const repo = table("repo")
     sync_limit: number(),
     history_complete: boolean(),
     history_cursor: string().optional(),
+    pull_limit: number(),
+    pull_history_limit: number(),
+    pull_synced_at: number().optional(),
     questions_version: number(),
     batch_size: number(),
     cadence_ms: number(),
@@ -109,6 +116,67 @@ const issueLabel = table("issue_label")
   })
   .primaryKey("issue_id", "label_id");
 
+const pull = table("pull")
+  .columns({
+    id: string(),
+    repo_id: string(),
+    number: number(),
+    title: string(),
+    body: string(),
+    state: string(),
+    draft: boolean(),
+    author: string(),
+    author_association: string(),
+    head_ref: string(),
+    base_ref: string(),
+    additions: number(),
+    deletions: number(),
+    changed_files: number(),
+    files_json: json<string[]>(),
+    labels_json: json<string[]>(),
+    requested_reviewers_json: json<string[]>(),
+    review_decision: string().optional(),
+    mergeable: string().optional(),
+    comments: number(),
+    created_at: number(),
+    updated_at: number(),
+    closed_at: number().optional(),
+    merged_at: number().optional(),
+    merged_by: string().optional(),
+    url: string(),
+    reclassify: boolean(),
+    classifying: boolean(),
+  })
+  .primaryKey("id");
+
+const pullReview = table("pull_review")
+  .columns({
+    id: string(),
+    pull_id: string(),
+    repo_id: string(),
+    reviewer: string(),
+    state: string(),
+    submitted_at: number(),
+  })
+  .primaryKey("id");
+
+export type ReviewerDir = { dir: string; count: number };
+
+const reviewer = table("reviewer")
+  .columns({
+    repo_id: string(),
+    login: string(),
+    reviews: number(),
+    approvals: number(),
+    changes_requested: number(),
+    last_review_at: number().optional(),
+    median_response_hours: number().optional(),
+    dirs_json: json<ReviewerDir[]>(),
+    recent_titles_json: json<string[]>(),
+    open_load: number(),
+  })
+  .primaryKey("repo_id", "login");
+
 const run = table("run")
   .columns({
     id: string(),
@@ -130,7 +198,8 @@ const run = table("run")
 const classification = table("classification")
   .columns({
     id: string(),
-    issue_id: string(),
+    issue_id: string().optional(),
+    pull_id: string().optional(),
     repo_id: string(),
     questions_version: number(),
     kind: string(),
@@ -146,7 +215,8 @@ const classification = table("classification")
 const feedback = table("feedback")
   .columns({
     id: string(),
-    issue_id: string(),
+    issue_id: string().optional(),
+    pull_id: string().optional(),
     repo_id: string(),
     user_id: string(),
     kind: string(),
@@ -185,6 +255,8 @@ const workerState = table("worker_state")
 
 const repoRelationships = relationships(repo, ({ many, one }) => ({
   issues: many({ sourceField: ["id"], destSchema: issue, destField: ["repo_id"] }),
+  pulls: many({ sourceField: ["id"], destSchema: pull, destField: ["repo_id"] }),
+  reviewers: many({ sourceField: ["id"], destSchema: reviewer, destField: ["repo_id"] }),
   labels: many({ sourceField: ["id"], destSchema: label, destField: ["repo_id"] }),
   runs: many({ sourceField: ["id"], destSchema: run, destField: ["repo_id"] }),
   workerState: one({ sourceField: ["id"], destSchema: workerState, destField: ["repo_id"] }),
@@ -205,9 +277,21 @@ const issueRelationships = relationships(issue, ({ many, one }) => ({
   ),
 }));
 
+const pullRelationships = relationships(pull, ({ many, one }) => ({
+  repo: one({ sourceField: ["repo_id"], destSchema: repo, destField: ["id"] }),
+  classifications: many({
+    sourceField: ["id"],
+    destSchema: classification,
+    destField: ["pull_id"],
+  }),
+  feedback: many({ sourceField: ["id"], destSchema: feedback, destField: ["pull_id"] }),
+  reviews: many({ sourceField: ["id"], destSchema: pullReview, destField: ["pull_id"] }),
+}));
+
 const feedbackRelationships = relationships(feedback, ({ one }) => ({
   user: one({ sourceField: ["user_id"], destSchema: user, destField: ["id"] }),
   issue: one({ sourceField: ["issue_id"], destSchema: issue, destField: ["id"] }),
+  pull: one({ sourceField: ["pull_id"], destSchema: pull, destField: ["id"] }),
 }));
 
 const classificationRelationships = relationships(classification, ({ one }) => ({
@@ -225,6 +309,9 @@ export const schema = createSchema({
     label,
     issue,
     issueLabel,
+    pull,
+    pullReview,
+    reviewer,
     run,
     classification,
     feedback,
@@ -234,6 +321,7 @@ export const schema = createSchema({
   relationships: [
     repoRelationships,
     issueRelationships,
+    pullRelationships,
     feedbackRelationships,
     classificationRelationships,
     presenceRelationships,

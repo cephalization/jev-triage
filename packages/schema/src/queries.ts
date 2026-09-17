@@ -15,6 +15,13 @@ export const issueFilterArgs = z.object({
   limit: z.number().int().min(1).max(2000).default(500),
 });
 
+export const pullFilterArgs = z.object({
+  repoId: z.string(),
+  state: z.enum(["open", "merged", "closed", "all"]).default("open"),
+  search: z.string().default(""),
+  limit: z.number().int().min(1).max(2000).default(500),
+});
+
 export const queries = defineQueries({
   users: {
     all: defineQuery(() => zql.user.orderBy("name", "asc")),
@@ -54,6 +61,41 @@ export const queries = defineQueries({
     ),
     byIds: defineQuery(z.array(z.string()), ({ args: ids }) => zql.issue.where("id", "IN", ids)),
   },
+  pulls: {
+    byRepo: defineQuery(pullFilterArgs, ({ args }) => {
+      let q = zql.pull.where("repo_id", args.repoId);
+      if (args.state !== "all") q = q.where("state", args.state);
+      if (args.search.trim()) {
+        const needle = `%${args.search.trim().replaceAll("%", "")}%`;
+        q = q.where((eb) =>
+          eb.or(
+            eb.cmp("title", "ILIKE", needle),
+            eb.cmp("body", "ILIKE", needle),
+            eb.cmp("author", "ILIKE", needle),
+          ),
+        );
+      }
+      return q
+        .orderBy("updated_at", "desc")
+        .limit(args.limit)
+        .related("classifications", (c) => c.orderBy("created_at", "desc"))
+        .related("feedback", (f) => f.orderBy("created_at", "desc"))
+        .related("reviews", (r) => r.orderBy("submitted_at", "desc"));
+    }),
+    byId: defineQuery(z.string(), ({ args: id }) =>
+      zql.pull
+        .where("id", id)
+        .one()
+        .related("classifications", (c) => c.orderBy("created_at", "desc"))
+        .related("feedback", (f) => f.orderBy("created_at", "desc").related("user"))
+        .related("reviews", (r) => r.orderBy("submitted_at", "desc")),
+    ),
+  },
+  reviewers: {
+    byRepo: defineQuery(z.string(), ({ args: repoId }) =>
+      zql.reviewer.where("repo_id", repoId).orderBy("reviews", "desc").orderBy("login", "asc"),
+    ),
+  },
   runs: {
     byRepo: defineQuery(
       z.object({ repoId: z.string(), limit: z.number().int().default(30) }),
@@ -70,7 +112,8 @@ export const queries = defineQueries({
           .orderBy("created_at", "desc")
           .limit(args.limit)
           .related("user")
-          .related("issue"),
+          .related("issue")
+          .related("pull"),
     ),
   },
   presence: {

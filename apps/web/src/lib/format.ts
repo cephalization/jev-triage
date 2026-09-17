@@ -76,3 +76,22 @@ export function severityColor(s: number | null): string {
   if (s >= 0.25) return STATUS.warning;
   return STATUS.good;
 }
+
+export const EFFORT_NAMES = ["Trivial", "Small", "Substantial", "Major"] as const;
+
+/** 0..1 review effort to a rubric level index (0–3), or null. */
+export function effortLevel(e: number | null): number | null {
+  if (e === null) return null;
+  return Math.min(3, Math.max(0, Math.round(e * 3)));
+}
+
+export const REVIEW_DECISION_NAMES: Record<string, string> = {
+  APPROVED: "Approved",
+  CHANGES_REQUESTED: "Changes requested",
+  REVIEW_REQUIRED: "Review required",
+};
+
+/** "+120 −30" style diff stat. */
+export function diffStat(additions: number, deletions: number): string {
+  return `+${compact(additions)} −${compact(deletions)}`;
+}

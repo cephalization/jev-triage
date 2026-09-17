@@ -1,6 +1,7 @@
 import { Octokit } from "octokit";
 import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
+import { syncPulls } from "./pulls.ts";
 
 /**
  * GitHub → Postgres sync, newest first.
@@ -12,7 +13,9 @@ import { env } from "../env.ts";
  *    mark (`repo.sync_cursor`) on a re-sync;
  *  - history phase: anything older, fetched slowly (one page every HISTORY_PAGE_DELAY_MS) so it
  *    never competes with the live parts; resumable via `repo.history_cursor`;
- *  - `repo.sync_limit` caps the number of issues kept (testing knob; default 100).
+ *  - `repo.sync_limit` caps the number of issues kept (testing knob; default 100);
+ *  - pull requests (see pulls.ts) are fetched once the recent issue phase ends, before the
+ *    slow history backfill, so open pulls and the reviewer roster land early.
  *
  * Progress lives on the repo row (`sync_phase`, `sync_fetched`, ...) and streams to clients.
  */
@@ -173,6 +176,27 @@ async function runSync(
     );
     let total = existing.size;
     let capped = total >= limit;
+    let pullsDone = false;
+    const pullsOnce = async () => {
+      if (pullsDone) return;
+      pullsDone = true;
+      if (!env.githubToken) {
+        await progress(repoId, { sync_message: "pull requests need GITHUB_TOKEN; skipped" });
+        return;
+      }
+      try {
+        const r = await syncPulls(octokit, owner, name, repoId, (f) => progress(repoId, f), {
+          onPage: hooks.onPage,
+        });
+        console.log(
+          `[sync] ${repoId} pulls: ${r.open} open, ${r.history} history, ${r.pages} pages`,
+        );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`[sync] ${repoId} pulls failed: ${message}`);
+        await progress(repoId, { sync_message: `pull requests failed: ${message}` });
+      }
+    };
 
     const iterator = octokit.paginate.iterator(octokit.rest.issues.listForRepo, {
       owner,
@@ -245,6 +269,8 @@ async function runSync(
         if (reachedKnown || !highWater) break walk;
       }
       if (reachedKnown && historyDone) break walk;
+      // Recent issues are in; fetch pull requests before the slow backfill.
+      if (phase === "history") await pullsOnce();
       if (remaining < 5 && reset > Date.now()) {
         const wait = reset - Date.now() + 1000;
         await progress(repoId, {
@@ -256,6 +282,7 @@ async function runSync(
       }
     }
     if (finalPhase !== "capped") historyDone = true;
+    await pullsOnce();
 
     await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now(),
       sync_cursor = ${newestSeen ?? highWater}, history_complete = ${historyDone}, history_cursor = ${oldestSeen},

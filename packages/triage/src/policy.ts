@@ -10,6 +10,8 @@ export interface Thresholds {
   duplicateMin: number;
   /** Noul probabilities at or above this count as "yes". */
   yes: number;
+  /** A reviewer suggestion is shown as confident at or above this (a choice among ~5). */
+  reviewerAuto: number;
 }
 
 export const THRESHOLDS: Thresholds = {
@@ -17,4 +19,5 @@ export const THRESHOLDS: Thresholds = {
   areaAuto: 0.6,
   duplicateMin: 0.7,
   yes: 0.5,
+  reviewerAuto: 0.45,
 };

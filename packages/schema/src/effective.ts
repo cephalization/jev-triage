@@ -1,4 +1,4 @@
-import type { ClassificationKind } from "./schema.ts";
+import type { ClassificationKind, PullKind } from "./schema.ts";
 
 /**
  * Effective value of a field = latest human feedback for that kind, else the latest
@@ -59,7 +59,7 @@ export function probabilitiesOf(c: ClassificationLike | null): Record<string, nu
 }
 
 export function effectiveField(
-  kind: ClassificationKind,
+  kind: string,
   classifications: readonly ClassificationLike[],
   feedback: readonly FeedbackLike[],
   questionsVersion: number,
@@ -102,14 +102,16 @@ export function effectiveField(
 }
 
 export type EffectiveIssue = Record<ClassificationKind, EffectiveField>;
+export type EffectivePull = Record<PullKind, EffectiveField>;
 
-export function effectiveIssue(
+/** Works for any family list: issues (CLASSIFICATION_KINDS) and pulls (PULL_KINDS). */
+export function effectiveIssue<K extends string>(
   classifications: readonly ClassificationLike[],
   feedback: readonly FeedbackLike[],
   questionsVersion: number,
-  kinds: readonly ClassificationKind[],
-): EffectiveIssue {
-  const out = {} as EffectiveIssue;
+  kinds: readonly K[],
+): Record<K, EffectiveField> {
+  const out = {} as Record<K, EffectiveField>;
   for (const k of kinds) out[k] = effectiveField(k, classifications, feedback, questionsVersion);
   return out;
 }

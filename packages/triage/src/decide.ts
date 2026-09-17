@@ -1,7 +1,8 @@
+import type { PullAnswers } from "./pulls.ts";
 import type { IssueAnswers } from "./questions.ts";
-import type { DuplicateCandidate } from "./types.ts";
+import type { DuplicateCandidate, ReviewerCandidate } from "./types.ts";
 import { THRESHOLDS, type Thresholds } from "./policy.ts";
-import { NONE, SEVERITY_LEVELS, URGENCY_LEVELS } from "./types.ts";
+import { NONE, REVIEW_EFFORT_LEVELS, SEVERITY_LEVELS, URGENCY_LEVELS } from "./types.ts";
 
 /**
  * Policy lives here, not in the questions. Pure: answers in, decisions out.
@@ -91,6 +92,75 @@ export function decide(
     actionable,
     duplicate,
     needsReview,
+    reasons,
+  };
+}
+
+// ---- Pull requests ---------------------------------------------------------
+
+export interface PullDecision {
+  /** 0..1, normalised expected score across the review-effort rubric. */
+  effort: number | null;
+  /** Rubric level the expected score rounds to. */
+  effortLevel: number | null;
+  reviewer: {
+    candidate: ReviewerCandidate | null;
+    confidence: number;
+    /** True when the suggestion is confident enough to show without a warning. */
+    applied: boolean;
+    candidateKey: string | null;
+  };
+  /** Probabilities re-keyed from candidate_N to logins (plus none). */
+  reviewerProbabilities: Record<string, number>;
+  needsReview: boolean;
+  reasons: string[];
+}
+
+export function decidePull(
+  answers: PullAnswers,
+  candidates: readonly ReviewerCandidate[],
+  t: Thresholds = THRESHOLDS,
+): PullDecision {
+  const reasons: string[] = [];
+  const effort = answers.review_effort
+    ? normaliseScore(answers.review_effort.score, REVIEW_EFFORT_LEVELS.length)
+    : null;
+  const effortLevel =
+    effort === null ? null : Math.round(effort * (REVIEW_EFFORT_LEVELS.length - 1));
+
+  const probs: Record<string, number> = {};
+  let reviewer: PullDecision["reviewer"] = {
+    candidate: null,
+    confidence: 0,
+    applied: false,
+    candidateKey: null,
+  };
+  const rv = answers.reviewer;
+  if (rv) {
+    for (const [k, v] of Object.entries(rv.probabilities)) {
+      const m = /^candidate_(\d+)$/.exec(k);
+      const c = m ? candidates[Number(m[1])] : undefined;
+      probs[c ? c.login : k] = v;
+    }
+    const m = /^candidate_(\d+)$/.exec(rv.choice);
+    const idx = m ? Number(m[1]) : -1;
+    const target = idx >= 0 && idx < candidates.length ? candidates[idx]! : null;
+    reviewer = {
+      candidate: target,
+      confidence: rv.confidence,
+      applied: target !== null && rv.confidence >= t.reviewerAuto,
+      candidateKey: rv.choice,
+    };
+    if (target && !reviewer.applied)
+      reasons.push(`reviewer confidence ${rv.confidence.toFixed(2)} < ${t.reviewerAuto}`);
+    if (!target && rv.choice === NONE) reasons.push("no candidate has reviewed related code");
+  }
+  return {
+    effort,
+    effortLevel,
+    reviewer,
+    reviewerProbabilities: probs,
+    needsReview: reasons.length > 0,
     reasons,
   };
 }

@@ -58,13 +58,25 @@ export function Settings({
   const [cadence, setCadence] = useState("2000");
   const [budget, setBudget] = useState("0");
   const [limit, setLimit] = useState("100");
+  const [pullLimit, setPullLimit] = useState("200");
+  const [pullHistory, setPullHistory] = useState("300");
   useEffect(() => {
     if (!repo) return;
     setBatch(String(repo.batch_size));
     setCadence(String(repo.cadence_ms));
     setBudget(String(repo.budget_tokens));
     setLimit(String(repo.sync_limit));
-  }, [repo?.id, repo?.batch_size, repo?.cadence_ms, repo?.budget_tokens, repo?.sync_limit]);
+    setPullLimit(String(repo.pull_limit));
+    setPullHistory(String(repo.pull_history_limit));
+  }, [
+    repo?.id,
+    repo?.batch_size,
+    repo?.cadence_ms,
+    repo?.budget_tokens,
+    repo?.sync_limit,
+    repo?.pull_limit,
+    repo?.pull_history_limit,
+  ]);
 
   const ws = repo?.workerState;
   return (
@@ -92,8 +104,8 @@ export function Settings({
         ))}
         <p className="text-xs text-muted-foreground text-pretty">
           Policy thresholds live in code: category auto-apply at {THRESHOLDS.categoryAuto}, area at{" "}
-          {THRESHOLDS.areaAuto}, duplicate at {THRESHOLDS.duplicateMin}. Duplicates are never
-          auto-closed.
+          {THRESHOLDS.areaAuto}, duplicate at {THRESHOLDS.duplicateMin}, reviewer at{" "}
+          {THRESHOLDS.reviewerAuto}. Duplicates are never auto-closed.
         </p>
       </Section>
 
@@ -150,6 +162,26 @@ export function Settings({
                 />
               </div>
               <div className="flex flex-col gap-1.5">
+                <Label htmlFor="pull-limit">Open pull requests to keep</Label>
+                <Input
+                  id="pull-limit"
+                  className="h-8"
+                  value={pullLimit}
+                  onChange={(e) => setPullLimit(e.target.value)}
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label htmlFor="pull-history">Reviewed pull requests (for reviewer stats)</Label>
+                <Input
+                  id="pull-history"
+                  className="h-8"
+                  value={pullHistory}
+                  onChange={(e) => setPullHistory(e.target.value)}
+                  inputMode="numeric"
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
                 <Label htmlFor="budget">Token budget (0 = unlimited)</Label>
                 <Input
                   id="budget"
@@ -175,6 +207,8 @@ export function Settings({
                       cadenceMs: Math.min(60_000, Math.max(250, Number(cadence) || 2000)),
                       budgetTokens: Math.max(0, Number(budget) || 0),
                       syncLimit: Math.min(5000, Math.max(1, Number(limit) || 100)),
+                      pullLimit: Math.min(2000, Math.max(1, Number(pullLimit) || 200)),
+                      pullHistoryLimit: Math.min(2000, Math.max(0, Number(pullHistory) || 0)),
                     }),
                   )
                 }

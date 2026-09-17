@@ -1,6 +1,6 @@
 import { defineMutator, defineMutators } from "@rocicorp/zero";
 import { z } from "zod";
-import { CLASSIFICATION_KINDS, zql } from "./schema.ts";
+import { CLASSIFICATION_KINDS, PULL_KINDS, zql } from "./schema.ts";
 
 /**
  * Client-safe mutators. They run optimistically in the browser and again on the
@@ -8,16 +8,22 @@ import { CLASSIFICATION_KINDS, zql } from "./schema.ts";
  * TypeSafe work). Everything here must be idempotent.
  */
 
-const kindSchema = z.enum(CLASSIFICATION_KINDS);
+const kindSchema = z.enum([...CLASSIFICATION_KINDS, ...PULL_KINDS]);
 
-export const feedbackSetArgs = z.object({
-  id: z.string(),
-  issueId: z.string(),
-  repoId: z.string(),
-  kind: kindSchema,
-  value: z.string(),
-  note: z.string().optional(),
-});
+/** Feedback names exactly one subject: an issue or a pull request. */
+export const feedbackSetArgs = z
+  .object({
+    id: z.string(),
+    issueId: z.string().optional(),
+    pullId: z.string().optional(),
+    repoId: z.string(),
+    kind: kindSchema,
+    value: z.string(),
+    note: z.string().optional(),
+  })
+  .refine((a) => (a.issueId === undefined) !== (a.pullId === undefined), {
+    message: "feedback needs exactly one of issueId or pullId",
+  });
 
 export const presenceHeartbeatArgs = z.object({
   /** Per-tab id; two tabs of one user are two rows, so they never overwrite each other. */
@@ -36,13 +42,16 @@ export const repoSetKnobsArgs = z.object({
   budgetTokens: z.number().int().min(0).optional(),
   paused: z.boolean().optional(),
   syncLimit: z.number().int().min(1).max(5000).optional(),
+  pullLimit: z.number().int().min(1).max(2000).optional(),
+  pullHistoryLimit: z.number().int().min(0).max(2000).optional(),
 });
 
 export const repoRecalculateArgs = z.object({
   repoId: z.string(),
-  /** "version" bumps questions_version (everything is redone); "flag" marks the given issues. */
+  /** "version" bumps questions_version (everything is redone); "flag" marks the given rows. */
   mode: z.enum(["version", "flag"]),
   issueIds: z.array(z.string()).optional(),
+  pullIds: z.array(z.string()).optional(),
 });
 
 export const mutators = defineMutators({
@@ -51,7 +60,8 @@ export const mutators = defineMutators({
       if (!ctx) throw new Error("Sign in to leave feedback");
       await tx.mutate.feedback.insert({
         id: args.id,
-        issue_id: args.issueId,
+        issue_id: args.issueId ?? null,
+        pull_id: args.pullId ?? null,
         repo_id: args.repoId,
         user_id: ctx.userID,
         kind: args.kind,
@@ -59,7 +69,8 @@ export const mutators = defineMutators({
         note: args.note ?? null,
         created_at: Date.now(),
       });
-      await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
+      if (args.issueId) await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
+      if (args.pullId) await tx.mutate.pull.update({ id: args.pullId, reclassify: true });
     }),
   },
   presence: {
@@ -92,6 +103,10 @@ export const mutators = defineMutators({
         ...(args.budgetTokens !== undefined ? { budget_tokens: args.budgetTokens } : {}),
         ...(args.paused !== undefined ? { paused: args.paused } : {}),
         ...(args.syncLimit !== undefined ? { sync_limit: args.syncLimit } : {}),
+        ...(args.pullLimit !== undefined ? { pull_limit: args.pullLimit } : {}),
+        ...(args.pullHistoryLimit !== undefined
+          ? { pull_history_limit: args.pullHistoryLimit }
+          : {}),
       });
     }),
     recalculate: defineMutator(repoRecalculateArgs, async ({ tx, ctx, args }) => {
@@ -107,6 +122,9 @@ export const mutators = defineMutators({
       }
       for (const id of args.issueIds ?? []) {
         await tx.mutate.issue.update({ id, reclassify: true });
+      }
+      for (const id of args.pullIds ?? []) {
+        await tx.mutate.pull.update({ id, reclassify: true });
       }
     }),
   },

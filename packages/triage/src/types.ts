@@ -71,3 +71,54 @@ export const URGENCY_LEVELS = [
 ] as const;
 
 export const NONE = "none";
+
+// ---- Pull requests ---------------------------------------------------------
+
+export const PULL_FAMILIES = ["review_effort", "reviewer"] as const;
+export type PullFamily = (typeof PULL_FAMILIES)[number];
+
+/** Ordered rubric for how much reviewer time a pull request needs. */
+export const REVIEW_EFFORT_LEVELS = [
+  "Trivial: a few lines or a mechanical change (typo, version bump, lockfile, formatting, generated code); under fifteen minutes",
+  "Small: one focused change in a single area that a reviewer can read start to finish in one sitting; about an hour",
+  "Substantial: several files or new behaviour that needs careful reading and probably running locally; half a day",
+  "Major: broad or risky change to core logic, data formats, concurrency, security, or many subsystems; a day or more",
+] as const;
+
+/** A reviewer the code shortlisted; the model picks among these (rerank pattern). */
+export interface ReviewerCandidate {
+  login: string;
+  reviews: number;
+  approvals: number;
+  /** Directories they review most, most first. */
+  dirs: string[];
+  /** Titles of pull requests they recently approved. */
+  recentTitles: string[];
+  /** Open pull requests they are already requested on or reviewing. */
+  openLoad: number;
+  lastReviewDays: number | null;
+  /** 0..1 share of this pull's changed directories they have reviewed before. */
+  pathOverlap: number;
+  /** Already requested on this pull. */
+  requested: boolean;
+}
+
+export interface PullForTriage {
+  id: string;
+  number: number;
+  title: string;
+  body: string;
+  state: string;
+  draft: boolean;
+  author: string;
+  labels: string[];
+  additions: number;
+  deletions: number;
+  changedFiles: number;
+  files: string[];
+  baseRef: string;
+  ageDays: number;
+  requestedReviewers: string[];
+  reviewDecision: string | null;
+  candidates: ReviewerCandidate[];
+}
