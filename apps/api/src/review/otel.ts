@@ -1,6 +1,8 @@
 import { OITracer } from "@arizeai/openinference-core";
+import { TypeSafeInstrumentation } from "@arizeai/openinference-instrumentation-typesafe";
 import { SEMRESATTRS_PROJECT_NAME } from "@arizeai/openinference-semantic-conventions";
 import { context, propagation, trace } from "@opentelemetry/api";
+import * as TypeSafe from "@typesafe-ai/sdk";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace";
@@ -9,7 +11,7 @@ import { env } from "../env.ts";
 
 /**
  * The API's OpenTelemetry setup: the Node provider, the stock OTLP protobuf exporter pointed
- * at Phoenix, and the OpenInference tracer over it. Registering the provider installs the
+ * at Phoenix, the OpenInference tracer over it, and the TypeSafe SDK instrumentation. Registering the provider installs the
  * AsyncLocalStorage context manager and the W3C propagator, so spans nest across `await`
  * and `traceHeaders()` carries the trace to the reviewer cell. Without a collector nothing is
  * registered and the tracer is the API's no-op.
@@ -32,6 +34,9 @@ if (env.phoenixEndpoint) {
     ],
   });
   provider.register();
+  // Every TypeSafe call becomes an LLM span with its request, answers and token counts. The
+  // API is ESM, so the SDK namespace is patched by hand rather than by a require hook.
+  new TypeSafeInstrumentation({ tracerProvider: provider }).manuallyInstrument(TypeSafe);
 }
 
 /** The OpenInference tracer; context attributes (session, user) land on every span it starts. */

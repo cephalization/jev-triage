@@ -141,7 +141,10 @@ triage queue fit together, and `CLAUDE.md` for the working rules if you use a co
 on http://localhost:7006. Every guided review is one trace there, following the OpenInference
 conventions: the review, each stage, every jev request with its state and answers, every model
 turn with its messages, tokens and cost, and every tool call with what it read. Set
-`PHOENIX_COLLECTOR_ENDPOINT` to send traces elsewhere, or leave it unset to send none.
+`PHOENIX_COLLECTOR_ENDPOINT` to send traces elsewhere, or leave it unset to send none. On
+start, `scripts/phoenix-seed.mjs` adds jev to Phoenix's model prices from
+`TYPESAFE_PRICE_INPUT_PER_MTOK` and `TYPESAFE_PRICE_OUTPUT_PER_MTOK` if no `typesafe` model is
+there yet, so Phoenix's cost totals include the jev calls.
 
 ## Guided reviews
 

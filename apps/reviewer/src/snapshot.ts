@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { cut } from "@triage/triage";
 import { isText, stripRoot, wanted } from "./snapshot-rules.ts";
 import { readTar } from "./tar.ts";
 
@@ -228,7 +229,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
       const lines = r.text.split("\n");
       for (let i = 0; i < lines.length; i += 1) {
         if (re.test(lines[i]!)) {
-          out.push({ path: r.path, line: i + 1, text: lines[i]!.slice(0, 200) });
+          out.push({ path: r.path, line: i + 1, text: cut(lines[i]!, 200) });
           if (out.length >= limit) return out;
         }
       }

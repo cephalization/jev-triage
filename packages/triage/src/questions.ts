@@ -24,7 +24,19 @@ export const BODY_EXCERPT_CHARS = 1500;
 
 export function excerpt(text: string, max = BODY_EXCERPT_CHARS): string {
   const t = text.replace(/\r/g, "").trim();
-  return t.length > max ? `${t.slice(0, max)}…` : t;
+  return t.length > max ? `${cut(t, max)}…` : t;
+}
+
+/**
+ * The first `max` UTF-16 units of `text`, never ending inside a surrogate pair. `slice` cuts by
+ * code unit, so a cut that lands between the halves of an emoji leaves a lone surrogate, and
+ * TypeSafe (like any JSON consumer that checks) rejects the request as invalid Unicode.
+ */
+export function cut(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? max - 1 : max;
+  return text.slice(0, end);
 }
 
 export function buildState(

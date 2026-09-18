@@ -12,7 +12,10 @@ import { tracer } from "./otel.ts";
 /**
  * One System One request on behalf of a review, accounted like every other: a `run` row per
  * request with its kind, the repo's token counters bumped, usage on the console with its
- * price, and an LLM span under whatever span is active when it is called.
+ * price, and a CHAIN span named for the kind under whatever span is active. The LLM span
+ * itself, with the request, the answers and the token counts, comes from the TypeSafe
+ * instrumentation registered in otel.ts; this span carries what the SDK cannot know: the
+ * kind, the item count, and the price from the configured rates.
  */
 export async function askSystemOne<const Q extends Questions>(
   systemOne: SystemOne,
@@ -27,11 +30,8 @@ export async function askSystemOne<const Q extends Questions>(
     `jev.${req.kind}`,
     {
       attributes: {
-        [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
-        [S.LLM_SYSTEM]: "typesafe",
-        [S.LLM_PROVIDER]: "typesafe",
-        [S.INPUT_VALUE]: JSON.stringify({ state: req.state, questions: req.questions }),
-        [S.INPUT_MIME_TYPE]: "application/json",
+        [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.CHAIN,
+        [S.INPUT_VALUE]: `${req.kind}: ${req.items} items, ${questionCount} questions`,
         "jev.items": req.items,
         "jev.questions": questionCount,
       },
@@ -42,12 +42,7 @@ export async function askSystemOne<const Q extends Questions>(
         const ms = Date.now() - t0;
         logUsage(req.repoId, req.kind, req.items, questionCount, result.usage, ms, result.model);
         span.setAttributes({
-          [S.LLM_MODEL_NAME]: result.model,
-          [S.OUTPUT_VALUE]: JSON.stringify(result.answers),
-          [S.OUTPUT_MIME_TYPE]: "application/json",
-          [S.LLM_TOKEN_COUNT_PROMPT]: result.usage.input_tokens,
-          [S.LLM_TOKEN_COUNT_COMPLETION]: result.usage.output_tokens,
-          [S.LLM_TOKEN_COUNT_TOTAL]: result.usage.input_tokens + result.usage.output_tokens,
+          [S.OUTPUT_VALUE]: `${result.model}: ${result.usage.input_tokens} in / ${result.usage.output_tokens} out`,
           ...priceAttributes(result.usage),
         });
         span.setStatus({ code: SpanStatusCode.OK });

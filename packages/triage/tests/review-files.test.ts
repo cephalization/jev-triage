@@ -49,6 +49,12 @@ describe("file questions", () => {
     });
     expect(state.files[0]!.diff_excerpt).toContain("+new");
     expect(excerptOf(files[0]!, 10)).toMatch(/more chars\)$/);
+    const emoji = splitPatch(
+      `diff --git a/e.md b/e.md\n--- a/e.md\n+++ b/e.md\n@@ -1 +1 @@\n-a\n+${String.fromCodePoint(0x1f680)}b\n`,
+    )[0]!;
+    // "@@ -1 +1 @@\n-a\n+" is 16 units; a cut at 17 would split the rocket, so it backs off.
+    expect(excerptOf(emoji, 17)).toBe("@@ -1 +1 @@\n-a\n+\n… (3 more chars)");
+    expect(excerptOf(emoji, 18)).toContain(String.fromCodePoint(0x1f680));
   });
 
   test("four families per file, keyed by index", () => {

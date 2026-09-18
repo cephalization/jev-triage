@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { EMULATED_ADMIN_TOKEN, EMULATOR_URL, emulateEnv } from "./emulate-env.mjs";
+import { seedPhoenixModel } from "./phoenix-seed.mjs";
 
 const root = new URL("..", import.meta.url).pathname;
 const emulate = process.argv.includes("--emulate");
@@ -73,6 +74,12 @@ await once("reviewer build", "pnpm", ["--filter", "@triage/reviewer", "build"]);
 await once("docker", "docker", ["compose", "up", "-d", "--wait"]);
 env.PHOENIX_COLLECTOR_ENDPOINT ||= "http://localhost:7006";
 console.log(`[dev] Phoenix traces at ${env.PHOENIX_COLLECTOR_ENDPOINT}`);
+// Phoenix prices only models it knows; jev is added once from the same rates the API uses.
+try {
+  console.log(`[dev] Phoenix model prices: ${await seedPhoenixModel(env)}`);
+} catch (e) {
+  console.error(`[dev] Phoenix model prices: ${e instanceof Error ? e.message : String(e)}`);
+}
 env.REVIEW_CELL_URL ||= `http://127.0.0.1:${env.REVIEWER_PORT || "9876"}`;
 console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (docker)`);
 await once("migrate", "pnpm", ["--filter", "@triage/api", "migrate"]);

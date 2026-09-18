@@ -3,6 +3,7 @@ import type { ChoiceResponse, NoulResponse, Questions, ScoreResponse } from "@ty
 import type { ReviewGroup } from "./groups.ts";
 import type { PatchFile } from "./patch.ts";
 import type { ReviewIntent } from "./prompt.ts";
+import { cut } from "../questions.ts";
 
 /**
  * jev over the diff. The agent writes the narrative; System One supplies structure it can rely
@@ -57,7 +58,7 @@ export function buildFileState(intent: ReviewIntent, files: readonly PatchFile[]
   return {
     pull_request: {
       title: intent.title,
-      description: intent.body.slice(0, 1500),
+      description: cut(intent.body, 1500),
       branch: `${intent.headRef} into ${intent.baseRef}`,
       changed_files: files.length,
     },
@@ -75,9 +76,7 @@ export function buildFileState(intent: ReviewIntent, files: readonly PatchFile[]
 export function excerptOf(f: PatchFile, chars = FILE_EXCERPT_CHARS): string {
   const at = f.text.indexOf("\n@@");
   const body = at === -1 ? "" : f.text.slice(at + 1);
-  return body.length > chars
-    ? `${body.slice(0, chars)}\n… (${body.length - chars} more chars)`
-    : body;
+  return body.length > chars ? `${cut(body, chars)}\n… (${body.length - chars} more chars)` : body;
 }
 
 export function fileQuestionKey(index: number, family: FileFamily): string {

@@ -3,6 +3,7 @@ import {
   buildQuestions,
   buildState,
   countQuestions,
+  cut,
   excerpt,
   foldAnswers,
   parseKey,
@@ -55,6 +56,15 @@ describe("state", () => {
 
   test("excerpt keeps short text intact", () => {
     expect(excerpt("hello")).toBe("hello");
+    // A cut that would land between the halves of an emoji backs off one unit; a lone surrogate
+    // in the state is rejected by TypeSafe as invalid Unicode.
+    const rocket = String.fromCodePoint(0x1f680);
+    expect(cut(`abc${rocket}def`, 4)).toBe("abc");
+    expect(cut(`abc${rocket}def`, 5)).toBe(`abc${rocket}`);
+    expect(cut("abcdef", 4)).toBe("abcd");
+    expect(cut("ab", 4)).toBe("ab");
+    const body = `${"x".repeat(999)}${rocket} more`;
+    expect(excerpt(body, 1000)).toBe(`${"x".repeat(999)}…`);
   });
 });
 

@@ -148,8 +148,11 @@ One OpenTelemetry trace per review, with the standard SDKs on both sides. The AP
 (`apps/api/src/review/otel.ts`) runs `@opentelemetry/sdk-trace-node` with the stock OTLP
 protobuf exporter and `@arizeai/openinference-core`'s tracer: a root agent span per review
 with the review as `session.id` and the requester as `user.id` set on the context, so the
-OpenInference tracer copies them onto every span beneath; a chain span per stage; and jev
-requests as LLM spans with their state and answers, nested by the async context. The cell
+OpenInference tracer copies them onto every span beneath; a chain span per stage; and a
+chain span per jev request (`jev.<kind>`: items, questions, price) holding the LLM span that
+`@arizeai/openinference-instrumentation-typesafe` records for the SDK call, with the state,
+the answers and the token counts. The SDK namespace is patched by hand at startup because
+the API is ESM; the worker's classification calls get the same LLM spans as roots. The cell
 runs `packages/openinference-workers`, the same stack arranged for workerd: an
 `AsyncLocalStorage` context manager, a fetch exporter, and a request span per stage whose
 export rides on the Durable Object's `waitUntil`. Every model turn is an LLM span with

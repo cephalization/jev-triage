@@ -1,4 +1,5 @@
 import { choice } from "@typesafe-ai/sdk";
+import { cut } from "../questions.ts";
 import type { ChoiceResponse, Questions } from "@typesafe-ai/sdk";
 import { excerptOf, type ClassifiedFile } from "./files.ts";
 import type { ReviewGroup } from "./groups.ts";
@@ -26,7 +27,7 @@ export function buildAssignState(
   files: readonly PatchFile[],
 ) {
   return {
-    pull_request: { title: intent.title, description: intent.body.slice(0, 1000) },
+    pull_request: { title: intent.title, description: cut(intent.body, 1000) },
     steps: steps.map((s, i) => ({ number: i + 1, name: s.name, intent: s.intent })),
     files: files.map((f) => ({
       path: f.path,

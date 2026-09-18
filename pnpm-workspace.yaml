@@ -16,6 +16,10 @@ catalog:
   zod: ^4.6.5
 overrides:
   vite@*: "catalog:"
+  # The TypeSafe instrumentation 0.1.0 pins conventions 2.11.0, which predates the `typesafe`
+  # provider and system values it sets; one copy of each OpenInference package, current.
+  "@arizeai/openinference-semantic-conventions": "2.12.0"
+  "@arizeai/openinference-core": "2.7.1"
 peerDependencyRules:
   allowAny:
     - vite
@@ -28,3 +32,6 @@ allowBuilds:
   protobufjs: false
 minimumReleaseAgeExclude:
   - "@pierre/diffs@1.4.3"
+  - "@arizeai/openinference-instrumentation-typesafe@0.1.0"
+  - "@arizeai/openinference-semantic-conventions@2.12.0"
+  - "@arizeai/openinference-core@2.7.1"

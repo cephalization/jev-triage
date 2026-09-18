@@ -1,5 +1,6 @@
 import { Type, type Message, type Tool } from "@earendil-works/pi-ai";
 import { injectTraceHeaders } from "@triage/openinference-workers";
+import { cut } from "@triage/triage";
 import {
   OpenInferenceSpanKind,
   SemanticConventions as S,
@@ -142,7 +143,7 @@ const noopTracer = trace.getTracer("noop");
 
 /** Bounded attribute payloads; Phoenix stores them, but a 5 MB prompt helps nobody. */
 function clip(text: string, max = 200_000): string {
-  return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more chars)` : text;
+  return text.length > max ? `${cut(text, max)}\n… (${text.length - max} more chars)` : text;
 }
 
 export async function runTool(
@@ -327,7 +328,7 @@ export async function runAgent(
         role: "toolResult",
         toolCallId: call.id,
         toolName: call.name,
-        content: [{ type: "text", text: result.text.slice(0, 40_000) }],
+        content: [{ type: "text", text: cut(result.text, 40_000) }],
         isError: result.isError,
         timestamp: Date.now(),
       });

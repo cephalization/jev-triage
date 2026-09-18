@@ -1,4 +1,4 @@
-import { NONE, QUESTIONS_VERSION } from "@triage/triage";
+import { cut, NONE, QUESTIONS_VERSION } from "@triage/triage";
 import {
   buildPullQuestions,
   buildPullState,
@@ -451,7 +451,7 @@ export class ClassifierWorker {
       .map((r) => ({
         number: r.number,
         title: r.title,
-        excerpt: r.body.slice(0, 300),
+        excerpt: cut(r.body, 300),
         category: r.category,
         ...(r.area && r.area !== NONE ? { area: r.area } : {}),
         ...(r.action ? { action: r.action } : {}),
