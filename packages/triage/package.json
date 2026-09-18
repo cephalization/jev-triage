@@ -9,13 +9,15 @@
     "./priority": "./src/priority.ts",
     "./calibration": "./src/calibration.ts",
     "./reviewers": "./src/reviewers.ts",
-    "./types": "./src/types.ts"
+    "./types": "./src/types.ts",
+    "./review": "./src/review/index.ts"
   },
   "scripts": {
     "test": "vp test"
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0"
+    "@typesafe-ai/sdk": "^0.6.0",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "typescript": "catalog:",

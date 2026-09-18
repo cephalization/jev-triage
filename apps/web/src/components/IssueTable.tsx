@@ -12,6 +12,7 @@ export interface UserInfo {
   id: string;
   name: string;
   color: string;
+  avatarUrl?: string | null;
 }
 
 /** Column header sits under the 32px view strip; section rows stack under both. */

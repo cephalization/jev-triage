@@ -1,0 +1,23 @@
+// The reviewer cell. `celld dev . --port 9876` runs it locally (state under .celld/dev);
+// `celld deploy . --bucket …` ships it to a fleet. One ReviewRun cell per guided review, one
+// RepoSnapshot per repository commit, one RepoIndex per repository (the ledger the settings
+// page reads).
+{
+  "name": "typeful-reviewer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "REVIEW_RUN", "class_name": "ReviewRun" },
+      { "name": "REPO_SNAPSHOT", "class_name": "RepoSnapshot" },
+      { "name": "REPO_INDEX", "class_name": "RepoIndex" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ReviewRun"] },
+    { "tag": "v2", "new_sqlite_classes": ["RepoSnapshot", "RepoIndex"] },
+  ],
+  // Optional shared secret the API must present; leave unset for loopback development.
+  "vars": { "REVIEWER_TOKEN": "" },
+}

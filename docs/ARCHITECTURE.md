@@ -12,6 +12,7 @@ the [README](../README.md).
 | Hono on Node (`apps/api`)        | Zero mutate and query endpoints, GitHub sync, TypeSafe worker, dev auth      |
 | React (`apps/web`)               | Dashboard; reads the local replica, writes through mutators                  |
 | `@typesafe-ai/sdk` (server only) | Classification and duplicate reranking                                       |
+| celld cells (`apps/reviewer`)    | Guided reviews: a run cell drives the pi SDK; a snapshot cell per commit     |
 
 Clients never talk to GitHub or TypeSafe. They read Zero rows and call mutators; the server
 side of a mutator is where classification work is enqueued.
@@ -120,6 +121,38 @@ last-writer-wins through Zero's rebase.
 issue gets new rows; old rows stay for comparison. The worker also bumps the repo's version to
 the code's `QUESTIONS_VERSION` when the code moves ahead.
 
+### Guided review
+
+`POST /api/reviews` queues a `guided_review` row and `runReviewJob` drives it in stages
+(`apps/api/src/review/stages.ts`). The diff comes from GitHub. The reviewer cell loads a
+snapshot of the repository at the head while jev answers four questions per changed file
+(`packages/triage/src/review/files.ts`, stored in `guided_review_file`, one `run` row per
+batch). The agent names the steps in one short call; jev assigns every file to a step in one
+request; the agent writes each step's text in parallel, reading the snapshot through
+`list_files`, `read_file`, `grep` and a jev-backed `rank_files`. Steps unchanged since the
+previous review are kept. Every stage streams through the row's `phase` and `groups_json`. There
+is no degraded path: a review needs jev and the reviewer cell, generation is refused up front
+when either is missing, and any stage failing fails the review with its reason. The screen at
+`/pulls/$pullId/review` reads the row, its file rows and everyone's `review_progress` marks
+through Zero, and fetches the patch from `/api/reviews/:id/patch`.
+
+### Traces
+
+One OpenTelemetry trace per review, with the standard SDKs on both sides. The API
+(`apps/api/src/review/otel.ts`) runs `@opentelemetry/sdk-trace-node` with the stock OTLP
+protobuf exporter and `@arizeai/openinference-core`'s tracer: a root agent span per review
+with the review as `session.id` and the requester as `user.id` set on the context, so the
+OpenInference tracer copies them onto every span beneath; a chain span per stage; and jev
+requests as LLM spans with their state and answers, nested by the async context. The cell
+runs `packages/openinference-workers`, the same stack arranged for workerd: an
+`AsyncLocalStorage` context manager, a fetch exporter, and a request span per stage whose
+export rides on the Durable Object's `waitUntil`. Every model turn is an LLM span with
+messages, tools, tokens and cost; every tool call is a tool span. The trace crosses the
+API→cell hop and the `rank_files` callback as a W3C `traceparent` header injected and
+extracted with the OpenTelemetry propagator, so the reranker span sits under the tool call
+that asked. Everything ships to `PHOENIX_COLLECTOR_ENDPOINT`; without it no provider is
+registered and the tracers are no-ops.
+
 ### Presence
 
 A heartbeat mutator every 15 seconds records which issue each tab has open. Rows older than 45
@@ -135,8 +168,12 @@ configured. A per-repo `budget_tokens` stops the worker when reached.
 
 ## Guardrails
 
-- Secrets and the TypeSafe SDK live only in `apps/api`.
+- Secrets and the TypeSafe SDK live only in `apps/api`. Provider keys are sealed at rest and
+  reach the reviewer cell only inside a request; the cell never stores them.
 - One in-flight request per repo; triggers during flight set a flag, never enqueue.
+- Guided reviews never regenerate on their own: a stale review warns and offers Regenerate.
+  Generation is rate limited per person and refused once the repo's review token budget is
+  spent. Removing an invite revokes that person's sessions at once.
 - Every model answer is stored with its `questions_version`; changing a question means a new
   version, never editing old rows.
 - `decide()` and the question builders are pure and covered by canned-answer tests; the only

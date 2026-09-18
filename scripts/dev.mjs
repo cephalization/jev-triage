@@ -1,9 +1,13 @@
 // Starts Postgres (docker compose), runs migrations, then api + zero-cache + web together.
 // Usage: vp run dev   (Ctrl-C stops everything). Env comes from the root .env.
-import { spawn } from "node:child_process";
+// With --emulate (vp run dev:emulate) the emulate.dev GitHub emulator starts first and sign-in
+// is pointed at it, so no GitHub OAuth app or account is needed; see scripts/emulate-env.mjs.
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { EMULATED_ADMIN_TOKEN, EMULATOR_URL, emulateEnv } from "./emulate-env.mjs";
 
 const root = new URL("..", import.meta.url).pathname;
+const emulate = process.argv.includes("--emulate");
 
 function loadEnv(path) {
   const out = {};
@@ -33,7 +37,8 @@ if (!existsSync(`${root}.env`)) {
   process.exit(1);
 }
 
-const env = { ...loadEnv(`${root}.env`), ...process.env };
+let env = { ...loadEnv(`${root}.env`), ...process.env };
+if (emulate) env = emulateEnv(env);
 
 const run = (name, cmd, args, opts = {}) => {
   const child = spawn(cmd, args, { cwd: root, stdio: "inherit", env, ...opts });
@@ -49,14 +54,80 @@ const once = (name, cmd, args, opts) =>
     );
   });
 
+/** Poll until the emulator answers, so the login page never races it. */
+async function waitFor(url, ms = 20_000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    try {
+      await fetch(url, { signal: AbortSignal.timeout(1000) });
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  return false;
+}
+
 await once("postgres", "docker", ["compose", "up", "-d", "--wait"]);
+env.PHOENIX_COLLECTOR_ENDPOINT ||= "http://localhost:7006";
+console.log(`[dev] Phoenix traces at ${env.PHOENIX_COLLECTOR_ENDPOINT}`);
 await once("migrate", "pnpm", ["--filter", "@triage/api", "migrate"]);
 
-const children = [
+const children = [];
+
+/** The reviewer cell runs under celld when it is installed; otherwise reviews run in the API. */
+function hasCelld() {
+  try {
+    execFileSync("sh", ["-c", "command -v celld"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const reviewerPort = env.REVIEWER_PORT || "9876";
+if (hasCelld()) {
+  env.REVIEW_CELL_URL ||= `http://127.0.0.1:${reviewerPort}`;
+  children.push(
+    run(
+      "reviewer",
+      "celld",
+      [
+        "dev",
+        "apps/reviewer",
+        "--port",
+        reviewerPort,
+        "--watch-ignore",
+        "node_modules/**",
+        "--watch-ignore",
+        ".celld/**",
+      ],
+      {
+        env: { ...env, PATH: `${root}apps/reviewer/node_modules/.bin:${env.PATH}` },
+      },
+    ),
+  );
+  console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (celld)`);
+} else {
+  console.log(
+    "[dev] celld not found; guided reviews are unavailable until it is installed: curl -fsSL celld.dev/install.sh | sh",
+  );
+}
+
+if (emulate) {
+  children.push(run("emulate", "pnpm", ["--filter", "@triage/api", "emulate"]));
+  if (!(await waitFor(`${EMULATOR_URL}/user`))) {
+    console.error(`[dev] the GitHub emulator did not come up on ${EMULATOR_URL}`);
+    process.exit(1);
+  }
+  console.log(
+    `[dev] emulated GitHub at ${EMULATOR_URL}: sign in with the token ${EMULATED_ADMIN_TOKEN}, or through "Continue with GitHub" and pick a user. Sync still uses ${env.GITHUB_SYNC_API_URL}.`,
+  );
+}
+children.push(
   run("api", "pnpm", ["--filter", "@triage/api", "dev"]),
   run("zero", "pnpm", ["--filter", "@triage/api", "zero"]),
   run("web", "pnpm", ["--filter", "@triage/web", "dev"]),
-];
+);
 const stop = () => {
   for (const c of children) c.kill("SIGINT");
   setTimeout(() => process.exit(0), 500);

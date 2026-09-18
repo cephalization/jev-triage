@@ -8,7 +8,9 @@ import {
   EFFORT_NAMES,
   SEVERITY_NAMES,
 } from "../lib/format.ts";
+import type { Session } from "../lib/auth.ts";
 import { HBars } from "./Charts.tsx";
+import { ReviewEnvironment } from "./ReviewEnvironment.tsx";
 
 function Tile({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -59,11 +61,15 @@ export function RepoPanel({
   pullRows,
   reviewers,
   users,
+  repoId,
+  session,
 }: {
   rows: TriageRow[];
   pullRows: PullRow[];
   reviewers: readonly ReviewerRosterRow[];
   users: Map<string, { name: string }>;
+  repoId: string | null;
+  session: Session;
 }) {
   const open = rows.filter((r) => r.issue.state === "open");
   const queue = open.filter((r) => !r.done);
@@ -140,6 +146,14 @@ export function RepoPanel({
           sub="no confident match"
         />
       </div>
+      {repoId && (
+        <Block
+          title="Review environment"
+          description="What the reviewer cells hold for this repository: a snapshot of the code per reviewed commit, and a record per run. Delete a snapshot to free its space; the next review of that commit loads it again."
+        >
+          <ReviewEnvironment repoId={repoId} session={session} />
+        </Block>
+      )}
       <div className="grid gap-x-10 gap-y-8 lg:grid-cols-2">
         <Block
           title="Next steps"

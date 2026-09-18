@@ -159,6 +159,18 @@ export const MISSING_NAMES: Record<string, string> = {
 
 export const EFFORT_NAMES = ["Trivial", "Small", "Substantial", "Major"] as const;
 
+/** What a running guided review is doing, from its `phase`. */
+export const REVIEW_PHASES: Record<string, string> = {
+  snapshot: "Loading the repository",
+  classify: "Classifying the files",
+  skeleton: "Naming the steps",
+  assign: "Placing files in steps",
+  narrate: "Writing the steps",
+};
+export function reviewPhaseText(phase: string | null | undefined): string {
+  return (phase && REVIEW_PHASES[phase]) || "Starting";
+}
+
 /** 0..1 review effort to a rubric level index (0–3), or null. */
 export function effortLevel(e: number | null): number | null {
   if (e === null) return null;

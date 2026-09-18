@@ -5,6 +5,12 @@ import { THRESHOLDS } from "@triage/triage/policy";
 import type { PriorityWeights } from "@triage/triage/priority";
 import { useEffect, useMemo, useState } from "react";
 import { costOf, pokeWorker, usePrices } from "../lib/api.ts";
+import type { Session } from "../lib/auth.ts";
+import { People } from "./People.tsx";
+import { Providers } from "./Providers.tsx";
+import { ReviewActivity } from "./ReviewActivity.tsx";
+import { ReviewCost } from "./ReviewCost.tsx";
+import { ReviewDefaults } from "./ReviewDefaults.tsx";
 import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
 import { Columns, Legend } from "./Charts.tsx";
@@ -54,6 +60,7 @@ function Section({
 
 /** Operator-facing: how the model and worker are doing, what they cost, and the knobs. */
 export function SystemPanel({
+  session,
   repoId,
   rows,
   weights,
@@ -61,6 +68,7 @@ export function SystemPanel({
   visibleIssueIds,
   now,
 }: {
+  session: Session;
   repoId: string | null;
   rows: TriageRow[];
   weights: PriorityWeights;
@@ -117,6 +125,14 @@ export function SystemPanel({
   const cal = calibrate(pairs, 5);
   const ece = expectedCalibrationError(cal);
   const ws = repo?.workerState;
+  const [adminLogins, setAdminLogins] = useState<string[]>([]);
+  useEffect(() => {
+    if (session.user.role !== "admin") return;
+    fetch("/api/auth/admins", { headers: { authorization: `Bearer ${session.token}` } })
+      .then((r) => (r.ok ? r.json() : { logins: [] }))
+      .then((d: { logins: string[] }) => setAdminLogins(d.logins))
+      .catch(() => setAdminLogins([]));
+  }, [session]);
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col divide-y p-6">
@@ -155,6 +171,51 @@ export function SystemPanel({
           sub={`${pairs.length} model vs human pairs`}
         />
       </div>
+
+      {session.user.role === "admin" && (
+        <Section
+          title="People"
+          description="Who can sign in. Invite a GitHub login and choose a role; removing an invite signs that person out at once."
+        >
+          <People session={session} adminLogins={adminLogins} now={now} />
+        </Section>
+      )}
+
+      {session.user.role === "admin" && (
+        <Section
+          title="Providers"
+          description="Model providers guided reviews can run on. Shared by everyone; keys are sealed on the server and never shown again."
+        >
+          <Providers session={session} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Guided reviews"
+          description="The provider and model used when someone generates a review of a pull request in this repo. Anyone can change it; a run can override it."
+        >
+          <ReviewDefaults repo={repo} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Review cost"
+          description="What generation costs at the providers, priced from the pi model catalog: every agent call, by day, split by model, provider or the owner of the key it ran on."
+        >
+          <ReviewCost repoId={repo.id} now={now} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Review activity"
+          description="Every generation in this repo: who asked, which model, and the provider tokens it used. The budget caps the total; generation is refused once it is spent."
+        >
+          <ReviewActivity repo={repo} now={now} />
+        </Section>
+      )}
 
       <Section
         title="Classification"

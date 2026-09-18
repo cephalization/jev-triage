@@ -1,6 +1,13 @@
 import { defineMutator, defineMutators, type Transaction } from "@rocicorp/zero";
 import { z } from "zod";
-import { CLASSIFICATION_KINDS, PULL_KINDS, TRIAGE_STATUSES, zql } from "./schema.ts";
+import {
+  CLASSIFICATION_KINDS,
+  PROVIDER_KINDS,
+  PULL_KINDS,
+  ROLES,
+  TRIAGE_STATUSES,
+  zql,
+} from "./schema.ts";
 
 /**
  * Client-safe mutators. They run optimistically in the browser and again on the
@@ -49,7 +56,29 @@ export const repoSetKnobsArgs = z.object({
   syncLimit: z.number().int().min(1).max(5000).optional(),
   pullLimit: z.number().int().min(1).max(2000).optional(),
   pullHistoryLimit: z.number().int().min(0).max(2000).optional(),
+  /** Default provider and model for guided reviews; null clears. */
+  reviewProviderId: z.string().nullable().optional(),
+  reviewModel: z.string().max(200).nullable().optional(),
+  /** Provider tokens this repo's reviews may spend in total; 0 = unlimited. */
+  reviewBudgetTokens: z.number().int().min(0).optional(),
 });
+
+const modelSchema = z.object({
+  id: z.string().min(1).max(200),
+  label: z.string().min(1).max(200),
+  enabled: z.boolean(),
+});
+
+/** Everything about a provider except its key, which goes through the API. */
+export const providerSaveArgs = z.object({
+  id: z.string().min(1).max(64),
+  kind: z.enum(PROVIDER_KINDS),
+  label: z.string().trim().min(1).max(60),
+  baseUrl: z.string().trim().url().max(300),
+  models: z.array(modelSchema).max(500).optional(),
+});
+
+export const providerRemoveArgs = z.object({ id: z.string().min(1) });
 
 export const repoRecalculateArgs = z.object({
   repoId: z.string(),
@@ -57,6 +86,26 @@ export const repoRecalculateArgs = z.object({
   mode: z.enum(["version", "flag"]),
   issueIds: z.array(z.string()).optional(),
   pullIds: z.array(z.string()).optional(),
+});
+
+/** GitHub logins are 1–39 chars of alphanumerics and single hyphens. */
+export const inviteAddArgs = z.object({
+  login: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/, "not a GitHub login"),
+  role: z.enum(ROLES).default("member"),
+  note: z.string().trim().max(200).optional(),
+});
+
+export const inviteRemoveArgs = z.object({ login: z.string().trim().min(1) });
+
+/** Mark or clear one step of a pull request's guided review for the signed-in person. */
+export const reviewMarkStepArgs = z.object({
+  pullId: z.string(),
+  reviewId: z.string(),
+  stepName: z.string().min(1).max(120),
+  reviewed: z.boolean(),
 });
 
 export const triageClaimArgs = z.object({
@@ -122,6 +171,62 @@ export const mutators = defineMutators({
       if (!args.reclassify) return;
       if (args.issueId) await tx.mutate.issue.update({ id: args.issueId, reclassify: true });
       if (args.pullId) await tx.mutate.pull.update({ id: args.pullId, reclassify: true });
+    }),
+  },
+  provider: {
+    save: defineMutator(providerSaveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can configure providers");
+      const existing = await tx.run(zql.provider.where("id", args.id).one());
+      const now = Date.now();
+      await tx.mutate.provider.upsert({
+        id: args.id,
+        kind: args.kind,
+        label: args.label,
+        base_url: args.baseUrl.replace(/\/+$/, ""),
+        key_hint: existing?.key_hint ?? null,
+        models_json: args.models ?? existing?.models_json ?? [],
+        created_by: existing?.created_by ?? ctx.userID,
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      });
+    }),
+    /** The server override also deletes the sealed key; the cascade covers the SQL side too. */
+    remove: defineMutator(providerRemoveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can remove providers");
+      await tx.mutate.provider.delete({ id: args.id });
+    }),
+  },
+  invite: {
+    add: defineMutator(inviteAddArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can invite");
+      const login = args.login.toLowerCase();
+      const existing = await tx.run(zql.invite.where("login", login).one());
+      await tx.mutate.invite.upsert({
+        login,
+        role: args.role,
+        invited_by: existing?.invited_by ?? ctx.userID,
+        note: args.note ?? existing?.note ?? null,
+        created_at: existing?.created_at ?? Date.now(),
+        accepted_at: existing?.accepted_at ?? null,
+        accepted_by: existing?.accepted_by ?? null,
+      });
+    }),
+    remove: defineMutator(inviteRemoveArgs, async ({ tx, ctx, args }) => {
+      if (ctx?.role !== "admin") throw new Error("Only admins can remove invites");
+      await tx.mutate.invite.delete({ login: args.login.toLowerCase() });
+    }),
+  },
+  review: {
+    markStep: defineMutator(reviewMarkStepArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to mark steps");
+      const key = { pull_id: args.pullId, user_id: ctx.userID, step_name: args.stepName };
+      if (args.reviewed)
+        await tx.mutate.review_progress.upsert({
+          ...key,
+          review_id: args.reviewId,
+          reviewed_at: Date.now(),
+        });
+      else await tx.mutate.review_progress.delete(key);
     }),
   },
   triage: {
@@ -204,6 +309,13 @@ export const mutators = defineMutators({
         ...(args.pullLimit !== undefined ? { pull_limit: args.pullLimit } : {}),
         ...(args.pullHistoryLimit !== undefined
           ? { pull_history_limit: args.pullHistoryLimit }
+          : {}),
+        ...(args.reviewProviderId !== undefined
+          ? { review_provider_id: args.reviewProviderId }
+          : {}),
+        ...(args.reviewModel !== undefined ? { review_model: args.reviewModel } : {}),
+        ...(args.reviewBudgetTokens !== undefined
+          ? { review_budget_tokens: args.reviewBudgetTokens }
           : {}),
       });
     }),

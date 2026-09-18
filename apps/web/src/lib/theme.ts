@@ -19,6 +19,33 @@ export function applyTheme(theme: Theme) {
   root.classList.toggle("dark", theme === "dark");
 }
 
+/**
+ * The theme in effect, resolved to light or dark, for components that theme themselves (the
+ * diff renderer runs in a shadow root and cannot see our CSS variables). Follows the class as
+ * the shell toggles it and the OS preference when no class is set.
+ */
+export function useResolvedTheme(): "light" | "dark" {
+  const read = (): "light" | "dark" => {
+    const c = document.documentElement.classList;
+    if (c.contains("dark")) return "dark";
+    if (c.contains("light")) return "light";
+    return matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  };
+  const [type, setType] = useState(read);
+  useEffect(() => {
+    const update = () => setType(read());
+    const obs = new MutationObserver(update);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    mq.addEventListener("change", update);
+    return () => {
+      obs.disconnect();
+      mq.removeEventListener("change", update);
+    };
+  }, []);
+  return type;
+}
+
 export function useTheme(): [Theme, (t: Theme) => void] {
   const [theme, setThemeState] = useState<Theme>(() => loadTheme());
   useEffect(() => applyTheme(theme), [theme]);

@@ -1,9 +1,23 @@
 {
   "files": [],
   "references": [
-    { "path": "./packages/schema" },
-    { "path": "./packages/triage" },
-    { "path": "./apps/api" },
-    { "path": "./apps/web" }
+    {
+      "path": "./packages/schema"
+    },
+    {
+      "path": "./packages/triage"
+    },
+    {
+      "path": "./packages/openinference-workers"
+    },
+    {
+      "path": "./apps/api"
+    },
+    {
+      "path": "./apps/web"
+    },
+    {
+      "path": "./apps/reviewer"
+    }
   ]
 }

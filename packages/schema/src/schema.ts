@@ -14,7 +14,14 @@ export type ZeroContext = {
   userID: string;
   name: string;
   color: string;
+  /** GitHub login, as GitHub spells it. */
+  login: string;
+  role: Role;
+  avatarUrl: string | null;
 };
+
+export const ROLES = ["member", "admin"] as const;
+export type Role = (typeof ROLES)[number];
 
 /**
  * Families asked about issues (questions v2). `action` is the maintainer's next step and
@@ -39,6 +46,11 @@ export type PullKind = (typeof PULL_KINDS)[number];
 export const CATEGORIES = ["bug", "feature", "question", "docs", "chore", "other"] as const;
 export type Category = (typeof CATEGORIES)[number];
 
+/** Model providers an admin can configure for guided reviews; keys live server-side only. */
+export const PROVIDER_KINDS = ["anthropic", "openai", "openrouter", "openai-compatible"] as const;
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
+export type ProviderModel = { id: string; label: string; enabled: boolean };
+
 /** Triage queue state of an issue. `done` leaves the queue; claiming names who is on it. */
 export const TRIAGE_STATUSES = ["open", "done"] as const;
 export type TriageStatus = (typeof TRIAGE_STATUSES)[number];
@@ -48,9 +60,28 @@ const user = table("user")
     id: string(),
     name: string(),
     color: string(),
+    login: string().optional(),
+    github_id: number().optional(),
+    avatar_url: string().optional(),
+    role: string(),
+    last_login_at: number().optional(),
+    revoked_at: number().optional(),
     created_at: number(),
   })
   .primaryKey("id");
+
+/** Allowlist: a GitHub login that may sign in, and the role it gets. Lowercased. */
+const invite = table("invite")
+  .columns({
+    login: string(),
+    role: string(),
+    invited_by: string().optional(),
+    note: string().optional(),
+    created_at: number(),
+    accepted_at: number().optional(),
+    accepted_by: string().optional(),
+  })
+  .primaryKey("login");
 
 const repo = table("repo")
   .columns({
@@ -84,7 +115,27 @@ const repo = table("repo")
     input_tokens_used: number(),
     output_tokens_used: number(),
     paused: boolean(),
+    review_provider_id: string().optional(),
+    review_model: string().optional(),
+    review_budget_tokens: number(),
     created_at: number(),
+  })
+  .primaryKey("id");
+
+/** Replicated half of a provider: everything but the key, which stays in a private schema. */
+const provider = table("provider")
+  .columns({
+    id: string(),
+    kind: string(),
+    label: string(),
+    base_url: string(),
+    key_hint: string().optional(),
+    /** Who set the key; the owner every cost row is charged to. */
+    key_set_by: string().optional(),
+    models_json: json<ProviderModel[]>(),
+    created_by: string().optional(),
+    created_at: number(),
+    updated_at: number(),
   })
   .primaryKey("id");
 
@@ -153,6 +204,7 @@ const pull = table("pull")
     author: string(),
     author_association: string(),
     head_ref: string(),
+    head_sha: string().optional(),
     base_ref: string(),
     additions: number(),
     deletions: number(),
@@ -173,6 +225,96 @@ const pull = table("pull")
     classifying: boolean(),
   })
   .primaryKey("id");
+
+export type ReviewGroupJson = {
+  name: string;
+  summary: string;
+  files: string[];
+  impact?: string;
+  findings?: { severity: "blocker" | "concern" | "note"; text: string }[];
+};
+
+/** One generated walkthrough of a pull request; the patch it used stays server-side. */
+const guidedReview = table("guided_review")
+  .columns({
+    id: string(),
+    pull_id: string(),
+    repo_id: string(),
+    head_sha: string().optional(),
+    status: string(),
+    provider_id: string().optional(),
+    model: string(),
+    groups_json: json<ReviewGroupJson[]>(),
+    file_count: number(),
+    error: string().optional(),
+    input_tokens: number(),
+    output_tokens: number(),
+    created_by: string().optional(),
+    created_at: number(),
+    started_at: number().optional(),
+    finished_at: number().optional(),
+    /** 'agent' for model-written steps, 'seed' when the file classification stood in. */
+    source: string(),
+    /** While running: snapshot | classify | skeleton | assign | narrate. */
+    phase: string().optional(),
+    tool_calls: number(),
+    reused_steps: number(),
+    /** Provider spend for this generation, from pi's catalog; priced=false means unknown. */
+    cost_usd: number(),
+    priced: boolean(),
+  })
+  .primaryKey("id");
+
+/** One agent call at the provider: tokens, money, and who is charged. */
+const llmCost = table("llm_cost")
+  .columns({
+    id: string(),
+    repo_id: string(),
+    review_id: string().optional(),
+    provider_id: string().optional(),
+    provider_kind: string(),
+    model: string(),
+    key_owner: string().optional(),
+    requested_by: string().optional(),
+    stage: string(),
+    input_tokens: number(),
+    output_tokens: number(),
+    cache_read_tokens: number(),
+    cache_write_tokens: number(),
+    cost_usd: number(),
+    priced: boolean(),
+    created_at: number(),
+  })
+  .primaryKey("id");
+
+/** jev's answers about one changed file of one review; the reason a file sits where it does. */
+const guidedReviewFile = table("guided_review_file")
+  .columns({
+    review_id: string(),
+    path: string(),
+    status: string(),
+    added: number(),
+    removed: number(),
+    role: string(),
+    role_confidence: number().optional(),
+    risk: number().optional(),
+    attention: number().optional(),
+    entry: number().optional(),
+    probabilities_json: json<Record<string, Record<string, number>>>(),
+    questions_version: number(),
+  })
+  .primaryKey("review_id", "path");
+
+/** One person's mark on one step of a pull request's review. */
+const reviewProgress = table("review_progress")
+  .columns({
+    pull_id: string(),
+    user_id: string(),
+    step_name: string(),
+    review_id: string().optional(),
+    reviewed_at: number(),
+  })
+  .primaryKey("pull_id", "user_id", "step_name");
 
 const pullReview = table("pull_review")
   .columns({
@@ -303,6 +445,10 @@ const issueRelationships = relationships(issue, ({ many, one }) => ({
   ),
 }));
 
+const inviteRelationships = relationships(invite, ({ one }) => ({
+  inviter: one({ sourceField: ["invited_by"], destSchema: user, destField: ["id"] }),
+}));
+
 const triageRelationships = relationships(triage, ({ one }) => ({
   issue: one({ sourceField: ["issue_id"], destSchema: issue, destField: ["id"] }),
   claimer: one({ sourceField: ["claimed_by"], destSchema: user, destField: ["id"] }),
@@ -317,6 +463,24 @@ const pullRelationships = relationships(pull, ({ many, one }) => ({
   }),
   feedback: many({ sourceField: ["id"], destSchema: feedback, destField: ["pull_id"] }),
   reviews: many({ sourceField: ["id"], destSchema: pullReview, destField: ["pull_id"] }),
+  guidedReviews: many({ sourceField: ["id"], destSchema: guidedReview, destField: ["pull_id"] }),
+  reviewProgress: many({ sourceField: ["id"], destSchema: reviewProgress, destField: ["pull_id"] }),
+}));
+
+const guidedReviewRelationships = relationships(guidedReview, ({ many, one }) => ({
+  pull: one({ sourceField: ["pull_id"], destSchema: pull, destField: ["id"] }),
+  creator: one({ sourceField: ["created_by"], destSchema: user, destField: ["id"] }),
+  files: many({ sourceField: ["id"], destSchema: guidedReviewFile, destField: ["review_id"] }),
+}));
+
+const llmCostRelationships = relationships(llmCost, ({ one }) => ({
+  provider: one({ sourceField: ["provider_id"], destSchema: provider, destField: ["id"] }),
+  keyOwner: one({ sourceField: ["key_owner"], destSchema: user, destField: ["id"] }),
+  requester: one({ sourceField: ["requested_by"], destSchema: user, destField: ["id"] }),
+}));
+
+const reviewProgressRelationships = relationships(reviewProgress, ({ one }) => ({
+  user: one({ sourceField: ["user_id"], destSchema: user, destField: ["id"] }),
 }));
 
 const feedbackRelationships = relationships(feedback, ({ one }) => ({
@@ -336,13 +500,19 @@ const presenceRelationships = relationships(presence, ({ one }) => ({
 export const schema = createSchema({
   tables: [
     user,
+    invite,
     repo,
+    provider,
     label,
     issue,
     issueLabel,
     triage,
     pull,
     pullReview,
+    guidedReview,
+    guidedReviewFile,
+    reviewProgress,
+    llmCost,
     reviewer,
     run,
     classification,
@@ -352,9 +522,13 @@ export const schema = createSchema({
   ],
   relationships: [
     repoRelationships,
+    inviteRelationships,
     issueRelationships,
     triageRelationships,
     pullRelationships,
+    guidedReviewRelationships,
+    reviewProgressRelationships,
+    llmCostRelationships,
     feedbackRelationships,
     classificationRelationships,
     presenceRelationships,

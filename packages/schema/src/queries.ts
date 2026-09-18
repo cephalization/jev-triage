@@ -26,6 +26,17 @@ export const queries = defineQueries({
   users: {
     all: defineQuery(() => zql.user.orderBy("name", "asc")),
   },
+  invites: {
+    /** The allowlist is for admins; everyone else gets an empty result from the server. */
+    all: defineQuery(({ ctx }) =>
+      ctx?.role === "admin"
+        ? zql.invite.orderBy("created_at", "desc").related("inviter")
+        : zql.invite.where("login", "=", ""),
+    ),
+  },
+  providers: {
+    all: defineQuery(() => zql.provider.orderBy("label", "asc")),
+  },
   repos: {
     all: defineQuery(() => zql.repo.orderBy("id", "asc").related("workerState")),
     byId: defineQuery(z.string(), ({ args: id }) =>
@@ -90,7 +101,49 @@ export const queries = defineQueries({
         .one()
         .related("classifications", (c) => c.orderBy("created_at", "desc"))
         .related("feedback", (f) => f.orderBy("created_at", "desc").related("user"))
-        .related("reviews", (r) => r.orderBy("submitted_at", "desc")),
+        .related("reviews", (r) => r.orderBy("submitted_at", "desc"))
+        .related("guidedReviews", (g) => g.orderBy("created_at", "desc").limit(3)),
+    ),
+  },
+  guidedReviews: {
+    /** The review screen: the newest runs of one pull request with jev's file rows, plus everyone's marks. */
+    byPull: defineQuery(z.string(), ({ args: pullId }) =>
+      zql.pull
+        .where("id", pullId)
+        .one()
+        .related("guidedReviews", (g) =>
+          g
+            .orderBy("created_at", "desc")
+            .limit(3)
+            .related("files", (f) => f.orderBy("path", "asc"))
+            .related("creator"),
+        )
+        .related("reviewProgress", (p) => p.related("user")),
+    ),
+    /** Who generated what, and what it cost: the audit and spend list under System. */
+    byRepo: defineQuery(
+      z.object({ repoId: z.string(), limit: z.number().int().default(200) }),
+      ({ args }) =>
+        zql.guided_review
+          .where("repo_id", args.repoId)
+          .orderBy("created_at", "desc")
+          .limit(args.limit)
+          .related("creator")
+          .related("pull"),
+    ),
+  },
+  llmCosts: {
+    /** Provider spend rows for the cost screen; the client buckets them by day and dimension. */
+    byRepo: defineQuery(
+      z.object({ repoId: z.string(), since: z.number(), limit: z.number().int().default(5000) }),
+      ({ args }) =>
+        zql.llm_cost
+          .where("repo_id", args.repoId)
+          .where("created_at", ">=", args.since)
+          .orderBy("created_at", "desc")
+          .limit(args.limit)
+          .related("provider")
+          .related("keyOwner"),
     ),
   },
   reviewers: {

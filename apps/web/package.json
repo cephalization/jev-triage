@@ -10,7 +10,9 @@
     "test": "vp test"
   },
   "dependencies": {
+    "@pierre/diffs": "^1.4.3",
     "@rocicorp/zero": "^1.9.0",
+    "@tanstack/react-router": "catalog:",
     "@triage/schema": "workspace:*",
     "@triage/triage": "workspace:*",
     "class-variance-authority": "^0.7.1",

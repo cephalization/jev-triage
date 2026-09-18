@@ -5,7 +5,9 @@ import type { Assignment } from "@triage/triage/reviewers";
 import { ExternalLink, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { ago, EFFORT_NAMES, pct, REVIEW_DECISION_NAMES, severityColor } from "../lib/format.ts";
+import type { Session } from "../lib/auth.ts";
 import { Avatar } from "./Avatar.tsx";
+import { GuidedReview } from "./GuidedReview.tsx";
 import { ProbStrip, ReviewDecisionMark, SectionLabel, StatusIcon, Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
@@ -51,6 +53,8 @@ export function PullPanel({
   questionsVersion,
   roster,
   assigned,
+  session,
+  hasReviewDefault,
   onClose,
   now,
 }: {
@@ -58,6 +62,9 @@ export function PullPanel({
   questionsVersion: number;
   roster: readonly RosterEntry[];
   assigned: Assignment | null;
+  session: Session;
+  /** The repo has a default provider and model for guided reviews. */
+  hasReviewDefault: boolean;
   onClose: () => void;
   now: number;
 }) {
@@ -241,6 +248,15 @@ export function PullPanel({
             placeholder="Add a note to your next change…"
           />
         </section>
+
+        <GuidedReview
+          pullId={pull.id}
+          headSha={pull.head_sha ?? null}
+          reviews={pull.guidedReviews}
+          hasDefault={hasReviewDefault}
+          session={session}
+          now={now}
+        />
 
         <section className="px-4 py-3">
           <SectionLabel kind="github">On GitHub</SectionLabel>
