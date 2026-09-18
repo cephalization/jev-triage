@@ -24,10 +24,11 @@ import { usePullRows } from "../lib/data.ts";
 import { groupByReviewer, sortPulls, type PullSortKey } from "../lib/derive.ts";
 import { useListKeys } from "../lib/keys.ts";
 import { useNow } from "../lib/presence.ts";
-import { pullsRoute } from "../router.tsx";
+import { pullsRoute, rootRoute } from "../router.tsx";
 
 /** Open pull requests by attention, or grouped by suggested reviewer. */
 export function PullsView() {
+  const { session } = rootRoute.useRouteContext();
   const search = pullsRoute.useSearch();
   const { pullId } = useParams({ strict: false });
   const selectedId = pullId ?? null;
@@ -178,6 +179,8 @@ export function PullsView() {
               questionsVersion={version}
               roster={reviewers}
               assigned={pullRows.find((r) => r.pull.id === selectedId)?.assigned ?? null}
+              session={session}
+              hasReviewDefault={!!repo?.review_provider_id && !!repo?.review_model}
               onClose={close}
               now={now}
             />

@@ -98,6 +98,14 @@ export const inviteAddArgs = z.object({
 
 export const inviteRemoveArgs = z.object({ login: z.string().trim().min(1) });
 
+/** Mark or clear one step of a pull request's guided review for the signed-in person. */
+export const reviewMarkStepArgs = z.object({
+  pullId: z.string(),
+  reviewId: z.string(),
+  stepName: z.string().min(1).max(120),
+  reviewed: z.boolean(),
+});
+
 export const triageClaimArgs = z.object({
   issueId: z.string(),
   repoId: z.string(),
@@ -204,6 +212,19 @@ export const mutators = defineMutators({
     remove: defineMutator(inviteRemoveArgs, async ({ tx, ctx, args }) => {
       if (ctx?.role !== "admin") throw new Error("Only admins can remove invites");
       await tx.mutate.invite.delete({ login: args.login.toLowerCase() });
+    }),
+  },
+  review: {
+    markStep: defineMutator(reviewMarkStepArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to mark steps");
+      const key = { pull_id: args.pullId, user_id: ctx.userID, step_name: args.stepName };
+      if (args.reviewed)
+        await tx.mutate.review_progress.upsert({
+          ...key,
+          review_id: args.reviewId,
+          reviewed_at: Date.now(),
+        });
+      else await tx.mutate.review_progress.delete(key);
     }),
   },
   triage: {

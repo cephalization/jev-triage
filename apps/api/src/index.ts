@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
 import { checkState, colorFor, contextFromRequest, mintToken, newState } from "./auth.ts";
-import { sql } from "./db.ts";
+import { newId, sql } from "./db.ts";
 import { env } from "./env.ts";
 import {
   exchangeCode,
@@ -15,6 +15,7 @@ import {
 } from "./github/account.ts";
 import { isSyncing, syncRepo } from "./github/sync.ts";
 import { isKind, KINDS, listModels } from "./providers/catalog.ts";
+import { failOrphanedReviews, isGenerating, runReviewJob } from "./review/job.ts";
 import {
   clearProviderKey,
   getProvider,
@@ -25,9 +26,10 @@ import { ClassifierWorker } from "./worker/classifier.ts";
 import { TypeSafeSystemOne } from "./worker/typesafe.ts";
 import { zeroRoutes } from "./zero/routes.ts";
 
-const worker = new ClassifierWorker(
-  env.typesafeKey ? new TypeSafeSystemOne(env.typesafeKey, env.typesafeModel) : null,
-);
+const systemOne = env.typesafeKey
+  ? new TypeSafeSystemOne(env.typesafeKey, env.typesafeModel)
+  : null;
+const worker = new ClassifierWorker(systemOne);
 const poke = (repoId: string, reason: string) => worker.poke(repoId, reason);
 
 const app = new Hono();
@@ -185,6 +187,52 @@ app.post("/api/providers/:id/models", async (c) => {
   }
 });
 
+// ---- Guided reviews -----------------------------------------------------------------
+
+const reviewBody = z.object({
+  pullId: z.string().min(1),
+  providerId: z.string().optional(),
+  model: z.string().max(200).optional(),
+});
+/** Queue a walkthrough of a pull request; progress streams through the guided_review row. */
+app.post("/api/reviews", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "sign in first" }, 401);
+  const parsed = reviewBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "pullId required" }, 400);
+  const { pullId } = parsed.data;
+  const [pull] = await sql<
+    {
+      id: string;
+      repo_id: string;
+      review_provider_id: string | null;
+      review_model: string | null;
+    }[]
+  >`select p.id, p.repo_id, r.review_provider_id, r.review_model
+      from pull p join repo r on r.id = p.repo_id where p.id = ${pullId}`;
+  if (!pull) return c.json({ error: "no such pull request" }, 404);
+  const providerId = parsed.data.providerId ?? pull.review_provider_id;
+  const model = parsed.data.model ?? pull.review_model;
+  if (!providerId || !model)
+    return c.json({ error: "pick a provider and model in System → Guided reviews first" }, 400);
+  if (isGenerating(pullId)) return c.json({ error: "a review is already generating" }, 409);
+  const id = newId();
+  await sql`insert into guided_review (id, pull_id, repo_id, provider_id, model, created_by)
+    values (${id}, ${pullId}, ${pull.repo_id}, ${providerId}, ${model}, ${ctx.userID})`;
+  void runReviewJob(id, { systemOne });
+  return c.json({ id }, 202);
+});
+
+/** The unified diff a review was generated from, for rendering its steps. */
+app.get("/api/reviews/:id/patch", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "sign in first" }, 401);
+  const [row] = await sql<{ patch: string }[]>`
+    select patch from private.review_patch where review_id = ${c.req.param("id")}`;
+  if (!row) return c.json({ error: "no patch stored" }, 404);
+  return c.text(row.patch, 200, { "content-type": "text/x-diff; charset=utf-8" });
+});
+
 /** Which logins the server treats as admins, for the People screen. */
 app.get("/api/auth/admins", async (c) => {
   const ctx = await contextFromRequest(c.req.raw);
@@ -249,4 +297,5 @@ serve({ fetch: app.fetch, port: env.port }, (info) => {
     `[api] listening on http://localhost:${info.port} (typesafe ${env.typesafeKey ? "on" : "OFF"}, github token ${env.githubToken ? "on" : "off"})`,
   );
   void worker.pokeAllWithPendingWork();
+  void failOrphanedReviews();
 });

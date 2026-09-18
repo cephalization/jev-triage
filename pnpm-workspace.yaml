@@ -13,6 +13,7 @@ catalog:
   typescript: ^7.0.2
   vite: npm:@voidzero-dev/vite-plus-core@0.3.2
   vite-plus: 0.3.2
+  zod: ^4.6.5
 overrides:
   vite@*: "catalog:"
 peerDependencyRules:
@@ -21,6 +22,9 @@ peerDependencyRules:
   allowedVersions:
     vite: "*"
 allowBuilds:
+  "@google/genai": false
   "@rocicorp/zero-sqlite3": true
   esbuild: false
   protobufjs: false
+minimumReleaseAgeExclude:
+  - "@pierre/diffs@1.4.3"

@@ -15,8 +15,8 @@ Nothing is written back to GitHub in any phase.
 | Phase | Deliverable                                                               | Status   |
 | ----- | ------------------------------------------------------------------------- | -------- |
 | 1     | Real authentication: GitHub sign-in, admin from env, allowlist invites    | done     |
-| 2     | Providers and models: shared, server-side, keys encrypted, chosen per run | building |
-| 3     | Review environment: fetch the PR, run a headless agent, store the result  |          |
+| 2     | Providers and models: shared, server-side, keys encrypted, chosen per run | done     |
+| 3     | Review environment: fetch the PR, run a headless agent, store the result  | building |
 | 4     | jev pass over the diff: per-file role, risk and attention, seeds grouping |          |
 | 5     | Review UI: step rail, per-step diffs, shared review, personal progress    |          |
 | 6     | Regeneration on new commits, cost accounting, hardening                   |          |
@@ -88,53 +88,60 @@ server.
 
 A `review` job fetches the pull request at its head commit and runs a headless agent over it.
 
-- **Runner interface.** `ReviewRunner.run({repo, headSha, patch, prompt, provider, model})` →
-  JSON. The first runner is a subprocess in a temporary checkout on the API host: shallow
-  fetch of the PR head with the repo's GitHub token, then `pi -p --no-session --no-tools` (or
-  `--tools` limited to read-only file access) with the provider key injected into the child's
-  environment only. Ten-minute timeout, one run in flight per pull request.
-- **Sandboxing.** The subprocess runner is the phase 3 deliverable. A container-backed runner
-  (Docker) is the intended second implementation behind the same interface. celld runs Workers
-  and Durable Objects, not processes; unless it grows an exec surface it is not the sandbox for
-  git plus a CLI agent, so the plan does not depend on it. Revisit when choosing the second
-  runner.
+- **Two runners, one pipeline.** The prompt, retry, validation and normalisation live in
+  `packages/triage/src/review` and run in either place. The reviewer cell (`apps/reviewer`) is
+  a celld Durable Object per review that runs the pi SDK (`@earendil-works/pi-ai`, with the
+  Anthropic, OpenAI and OpenRouter providers registered and explicit keys) and answers
+  `POST /runs/{id}`; `REVIEW_CELL_URL` points the API at it, and `vp run dev` starts it when
+  celld is installed. Without a cell the API's in-process runner
+  (`apps/api/src/review/runner.ts`) calls the provider's HTTP API directly. The diff comes
+  from GitHub's pull request diff endpoint with the server token; no checkout yet. Ten-minute
+  timeout, one run in flight per pull request, orphaned runs failed on restart. The cell is
+  where tools and a repository snapshot go next, so the agent can read beyond the diff.
+- **Isolation.** The cell is the agent's environment: a Durable Object per review with its own
+  storage, no process, no shell, network only to the provider. That is enough for a diff-only
+  review. When the agent needs to read the repository, give the cell a snapshot (tarball or
+  GitHub contents API through a tool) rather than a checkout, so the boundary stays the
+  Worker's. The in-process runner stays as the no-celld fallback.
+- **Storage.** `guided_review(id, pull_id, repo_id, head_sha, status, provider_id, model,
+groups_json, file_count, error, input_tokens, output_tokens, created_by, created_at,
+started_at, finished_at)` in Zero, the patch in `private.review_patch`. The row is the
+  progress channel (queued, running, ready, failed) so every viewer watches the same run.
 - **Prompt.** Port `buildReviewPrompt` and `renderPatchForReview` from overfactor: a complete
   file manifest, diff bodies under a character budget with stub lines for what is omitted,
   intent from the PR title and body, previous groups for stable regeneration, Simplified
   Technical English, two to ten ordered steps, core first, churn last. Validate with zod and
   retry once with the error folded in.
-- **Storage.** `review(id, pull_id, repo_id, head_sha, status, provider, model, groups_json,
-patch, error, input_tokens, output_tokens, created_by, started_at, finished_at)`. Progress is
-  streamed through the row (status, step) so every viewer watches the same generation.
 
-## Phase 4: jev over the diff
+## Phase 4: jev over the diff (done)
 
 The agent writes narrative; jev supplies structure it can rely on, cheaply and reproducibly.
 
-- Code splits the patch into files and hunks. Per file, one TypeSafe request per pull asks:
-  `role` (Choice: core logic, supporting change, tests, configuration or build, generated or
-  vendored, documentation, formatting only), `risk` (Score over four levels), `attention`
-  (Score: how much a reviewer needs to read this), and `entry_point` (Noul: does understanding
-  the change start here).
-- `groupSeed()` in `packages/triage` turns those answers into an ordered proposal: entry points
-  and core logic first, supporting changes next, tests, then configuration, generated and
-  formatting last. The proposal goes into the agent prompt as `<classification>`; the agent may
-  merge or reorder but must place every file. If the agent fails, the proposal alone is served
-  as a review with generic step titles, so a review always exists.
-- Answers are stored as `classification` rows against the pull with kind prefixes, versioned
-  like everything else, and shown in the review UI as the reason a file sits where it does.
+- `packages/triage/src/review/files.ts` splits the patch into files and asks, per file and in
+  batches of sixteen with a diff excerpt each: `role` (Choice over core, supporting, tests,
+  docs, config, generated, formatting), `risk` (Score over four situations), `attention`
+  (Score over skim, read, read carefully) and `entry` (Noul: does understanding the change
+  start here). Seven files cost about 7.6k input tokens and half a second.
+- `groupSeed()` turns the answers into the ordered proposal: core first (entry points and the
+  riskiest leading), adoption, tests, docs, config, churn last. `renderClassification()` is what
+  the agent receives as `<classification>`; it may merge or reorder but must place every file.
+  If the agent fails and the proposal exists, the proposal is served as the review with
+  `source = 'seed'` and the agent's error on the row, so a review always exists.
+- Answers live in `guided_review_file` (one row per review and path, with
+  `REVIEW_FILE_QUESTIONS_VERSION`), and the review screen shows them as the reason a file sits
+  where it does. Every request is a `run` row of kind `review_files`, so it counts toward cost.
 
-## Phase 5: review UI
+## Phase 5: review UI (done)
 
-- From the pull panel: "Generate guided review" (or "Regenerate" when the head moved), with the
-  provider and model picker defaulting to the repo's choice.
-- A review route inside the app: left rail with step counter, title and narrative, file chips,
-  previous and next, "Mark reviewed"; right pane with that step's diffs, low-signal files
-  collapsed. Diff rendering with a proven component rather than a hand-rolled one.
-- Shared review, personal progress: `review_progress(review_id, user_id, group_key,
-reviewed_at)`. Everyone sees the same steps; each person's checkmarks are their own, and the
-  rail shows who has finished which steps.
-- Files changed since generation appear as a synthetic final step until someone regenerates.
+- `/pulls/$pullId/review?step=n`: a rail with the step counter, name, narrative and file chips
+  (role tag with jev's answers in the tooltip), previous and next, "Mark reviewed"; the diff pane
+  renders that step's files with `@pierre/diffs`, lockfiles, generated output, very large diffs
+  and files jev said to skim collapsed to a bar. Keys: `]`/`n`, `[`/`p`, `m`, Esc.
+- Shared review, personal progress: `review_progress(pull_id, user_id, step_name)`. Keyed by
+  step name within the pull request, so a regeneration that keeps a step's name keeps
+  everyone's marks; the rail shows other people's avatars per step.
+- Files GitHub lists now that the review never saw appear as a final "Changed since generation"
+  step until someone regenerates. The pull panel links into the screen once a review is ready.
 
 ## Phase 6: regeneration, cost, hardening
 

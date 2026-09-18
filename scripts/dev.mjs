@@ -2,7 +2,7 @@
 // Usage: vp run dev   (Ctrl-C stops everything). Env comes from the root .env.
 // With --emulate (vp run dev:emulate) the emulate.dev GitHub emulator starts first and sign-in
 // is pointed at it, so no GitHub OAuth app or account is needed; see scripts/emulate-env.mjs.
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { EMULATED_ADMIN_TOKEN, EMULATOR_URL, emulateEnv } from "./emulate-env.mjs";
 
@@ -72,6 +72,45 @@ await once("postgres", "docker", ["compose", "up", "-d", "--wait"]);
 await once("migrate", "pnpm", ["--filter", "@triage/api", "migrate"]);
 
 const children = [];
+
+/** The reviewer cell runs under celld when it is installed; otherwise reviews run in the API. */
+function hasCelld() {
+  try {
+    execFileSync("sh", ["-c", "command -v celld"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+const reviewerPort = env.REVIEWER_PORT || "9876";
+if (hasCelld()) {
+  env.REVIEW_CELL_URL ||= `http://127.0.0.1:${reviewerPort}`;
+  children.push(
+    run(
+      "reviewer",
+      "celld",
+      [
+        "dev",
+        "apps/reviewer",
+        "--port",
+        reviewerPort,
+        "--watch-ignore",
+        "node_modules/**",
+        "--watch-ignore",
+        ".celld/**",
+      ],
+      {
+        env: { ...env, PATH: `${root}apps/reviewer/node_modules/.bin:${env.PATH}` },
+      },
+    ),
+  );
+  console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (celld)`);
+} else {
+  console.log(
+    "[dev] celld not found; guided reviews run inside the API process. Install: curl -fsSL celld.dev/install.sh | sh",
+  );
+}
+
 if (emulate) {
   children.push(run("emulate", "pnpm", ["--filter", "@triage/api", "emulate"]));
   if (!(await waitFor(`${EMULATOR_URL}/user`))) {

@@ -221,6 +221,61 @@ const pull = table("pull")
   })
   .primaryKey("id");
 
+export type ReviewGroupJson = { name: string; summary: string; files: string[] };
+
+/** One generated walkthrough of a pull request; the patch it used stays server-side. */
+const guidedReview = table("guided_review")
+  .columns({
+    id: string(),
+    pull_id: string(),
+    repo_id: string(),
+    head_sha: string().optional(),
+    status: string(),
+    provider_id: string().optional(),
+    model: string(),
+    groups_json: json<ReviewGroupJson[]>(),
+    file_count: number(),
+    error: string().optional(),
+    input_tokens: number(),
+    output_tokens: number(),
+    created_by: string().optional(),
+    created_at: number(),
+    started_at: number().optional(),
+    finished_at: number().optional(),
+    /** 'agent' for model-written steps, 'seed' when the file classification stood in. */
+    source: string(),
+  })
+  .primaryKey("id");
+
+/** jev's answers about one changed file of one review; the reason a file sits where it does. */
+const guidedReviewFile = table("guided_review_file")
+  .columns({
+    review_id: string(),
+    path: string(),
+    status: string(),
+    added: number(),
+    removed: number(),
+    role: string(),
+    role_confidence: number().optional(),
+    risk: number().optional(),
+    attention: number().optional(),
+    entry: number().optional(),
+    probabilities_json: json<Record<string, Record<string, number>>>(),
+    questions_version: number(),
+  })
+  .primaryKey("review_id", "path");
+
+/** One person's mark on one step of a pull request's review. */
+const reviewProgress = table("review_progress")
+  .columns({
+    pull_id: string(),
+    user_id: string(),
+    step_name: string(),
+    review_id: string().optional(),
+    reviewed_at: number(),
+  })
+  .primaryKey("pull_id", "user_id", "step_name");
+
 const pullReview = table("pull_review")
   .columns({
     id: string(),
@@ -368,6 +423,17 @@ const pullRelationships = relationships(pull, ({ many, one }) => ({
   }),
   feedback: many({ sourceField: ["id"], destSchema: feedback, destField: ["pull_id"] }),
   reviews: many({ sourceField: ["id"], destSchema: pullReview, destField: ["pull_id"] }),
+  guidedReviews: many({ sourceField: ["id"], destSchema: guidedReview, destField: ["pull_id"] }),
+  reviewProgress: many({ sourceField: ["id"], destSchema: reviewProgress, destField: ["pull_id"] }),
+}));
+
+const guidedReviewRelationships = relationships(guidedReview, ({ many, one }) => ({
+  pull: one({ sourceField: ["pull_id"], destSchema: pull, destField: ["id"] }),
+  files: many({ sourceField: ["id"], destSchema: guidedReviewFile, destField: ["review_id"] }),
+}));
+
+const reviewProgressRelationships = relationships(reviewProgress, ({ one }) => ({
+  user: one({ sourceField: ["user_id"], destSchema: user, destField: ["id"] }),
 }));
 
 const feedbackRelationships = relationships(feedback, ({ one }) => ({
@@ -396,6 +462,9 @@ export const schema = createSchema({
     triage,
     pull,
     pullReview,
+    guidedReview,
+    guidedReviewFile,
+    reviewProgress,
     reviewer,
     run,
     classification,
@@ -409,6 +478,8 @@ export const schema = createSchema({
     issueRelationships,
     triageRelationships,
     pullRelationships,
+    guidedReviewRelationships,
+    reviewProgressRelationships,
     feedbackRelationships,
     classificationRelationships,
     presenceRelationships,

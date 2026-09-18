@@ -101,7 +101,23 @@ export const queries = defineQueries({
         .one()
         .related("classifications", (c) => c.orderBy("created_at", "desc"))
         .related("feedback", (f) => f.orderBy("created_at", "desc").related("user"))
-        .related("reviews", (r) => r.orderBy("submitted_at", "desc")),
+        .related("reviews", (r) => r.orderBy("submitted_at", "desc"))
+        .related("guidedReviews", (g) => g.orderBy("created_at", "desc").limit(3)),
+    ),
+  },
+  guidedReviews: {
+    /** The review screen: the newest runs of one pull request with jev's file rows, plus everyone's marks. */
+    byPull: defineQuery(z.string(), ({ args: pullId }) =>
+      zql.pull
+        .where("id", pullId)
+        .one()
+        .related("guidedReviews", (g) =>
+          g
+            .orderBy("created_at", "desc")
+            .limit(3)
+            .related("files", (f) => f.orderBy("path", "asc")),
+        )
+        .related("reviewProgress", (p) => p.related("user")),
     ),
   },
   reviewers: {

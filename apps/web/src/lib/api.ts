@@ -65,6 +65,23 @@ export async function apiJson<T>(
   return data;
 }
 
+/** Queue a guided review of a pull request with the repo's default provider and model. */
+export function generateGuidedReview(token: string, pullId: string) {
+  return apiJson<{ id: string }>(token, "/api/reviews", { method: "POST", body: { pullId } });
+}
+
+/** The unified diff a review was generated from; rendered by the review screen. */
+export async function fetchReviewPatch(token: string, reviewId: string): Promise<string> {
+  const res = await fetch(`/api/reviews/${encodeURIComponent(reviewId)}/patch`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? `patch unavailable (${res.status})`);
+  }
+  return res.text();
+}
+
 export function pokeWorker(repoId: string) {
   return fetch("/api/classify/poke", {
     method: "POST",

@@ -10,6 +10,8 @@ import type { Session } from "./lib/auth.ts";
 import {
   PULLS_DEFAULTS,
   pullsSearch,
+  REVIEW_DEFAULTS,
+  reviewSearch,
   rootSearch,
   TRIAGE_DEFAULTS,
   triageSearch,
@@ -18,6 +20,7 @@ import {
 } from "./lib/search.ts";
 import { PullsView } from "./views/PullsView.tsx";
 import { RepoView } from "./views/RepoView.tsx";
+import { ReviewView } from "./views/ReviewView.tsx";
 import { Shell } from "./views/Shell.tsx";
 import { SystemView } from "./views/SystemView.tsx";
 import { TriageView } from "./views/TriageView.tsx";
@@ -76,6 +79,15 @@ export const pullsRoute = createRoute({
 });
 const pullRoute = createRoute({ getParentRoute: () => pullsRoute, path: "$pullId" });
 
+/** The full-screen guided review of one pull request; more specific than /pulls/$pullId. */
+export const reviewRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "pulls/$pullId/review",
+  validateSearch: reviewSearch,
+  search: { middlewares: [stripSearchParams(REVIEW_DEFAULTS)] },
+  component: ReviewView,
+});
+
 export const repoRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "repo",
@@ -101,6 +113,7 @@ const routeTree = rootRoute.addChildren([
   triageRoute.addChildren([triageIssueRoute]),
   unsureRoute.addChildren([unsureIssueRoute]),
   pullsRoute.addChildren([pullRoute]),
+  reviewRoute,
   repoRoute,
   systemRoute,
 ]);

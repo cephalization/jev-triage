@@ -1,0 +1,14 @@
+// The reviewer cell. `celld dev . --port 9876` runs it locally (state under .celld/dev);
+// `celld deploy . --bucket …` ships it to a fleet. One ReviewRun cell per guided review.
+{
+  "name": "typeful-reviewer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "REVIEW_RUN", "class_name": "ReviewRun" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ReviewRun"] }],
+  // Optional shared secret the API must present; leave unset for loopback development.
+  "vars": { "REVIEWER_TOKEN": "" },
+}

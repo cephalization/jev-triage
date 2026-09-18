@@ -12,6 +12,7 @@ the [README](../README.md).
 | Hono on Node (`apps/api`)        | Zero mutate and query endpoints, GitHub sync, TypeSafe worker, dev auth      |
 | React (`apps/web`)               | Dashboard; reads the local replica, writes through mutators                  |
 | `@typesafe-ai/sdk` (server only) | Classification and duplicate reranking                                       |
+| celld cell (`apps/reviewer`)     | Guided reviews: one Durable Object per run drives the pi SDK; optional       |
 
 Clients never talk to GitHub or TypeSafe. They read Zero rows and call mutators; the server
 side of a mutator is where classification work is enqueued.
@@ -120,6 +121,17 @@ last-writer-wins through Zero's rebase.
 issue gets new rows; old rows stay for comparison. The worker also bumps the repo's version to
 the code's `QUESTIONS_VERSION` when the code moves ahead.
 
+### Guided review
+
+`POST /api/reviews` queues a `guided_review` row and `runReviewJob` drives it: the diff comes
+from GitHub, jev answers four questions per changed file (`packages/triage/src/review/files.ts`,
+stored in `guided_review_file`, one `run` row per batch), `groupSeed()` turns the answers into an
+ordered proposal, and the agent (the reviewer cell, or the in-process runner) writes the steps
+with the proposal as `<classification>`. If the agent fails, the proposal is served as the
+review with `source = 'seed'`. The screen at `/pulls/$pullId/review` reads the row, its file
+rows and everyone's `review_progress` marks through Zero, and fetches the patch from
+`/api/reviews/:id/patch`.
+
 ### Presence
 
 A heartbeat mutator every 15 seconds records which issue each tab has open. Rows older than 45
@@ -135,7 +147,8 @@ configured. A per-repo `budget_tokens` stops the worker when reached.
 
 ## Guardrails
 
-- Secrets and the TypeSafe SDK live only in `apps/api`.
+- Secrets and the TypeSafe SDK live only in `apps/api`. Provider keys are sealed at rest and
+  reach the reviewer cell only inside a request; the cell never stores them.
 - One in-flight request per repo; triggers during flight set a flag, never enqueue.
 - Every model answer is stored with its `questions_version`; changing a question means a new
   version, never editing old rows.

@@ -41,6 +41,9 @@ export const env = {
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter(Boolean),
+  /** The reviewer cell (apps/reviewer). Unset means reviews run inside this process. */
+  reviewCellUrl: process.env.REVIEW_CELL_URL?.trim().replace(/\/+$/, "") || null,
+  reviewCellToken: process.env.REVIEWER_TOKEN?.trim() || null,
   priceInputPerMTok: optionalNumber("TYPESAFE_PRICE_INPUT_PER_MTOK"),
   priceOutputPerMTok: optionalNumber("TYPESAFE_PRICE_OUTPUT_PER_MTOK"),
 };

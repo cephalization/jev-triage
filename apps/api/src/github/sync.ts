@@ -40,7 +40,7 @@ export type SyncHooks = {
   onPage?: (repoId: string, stored: number) => void;
 };
 
-function makeOctokit() {
+export function makeOctokit() {
   return new Octokit({
     auth: env.githubToken ?? undefined,
     baseUrl: env.githubSyncApiUrl,

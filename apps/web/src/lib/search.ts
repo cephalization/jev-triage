@@ -54,3 +54,8 @@ export const pullsSearch = z.object({
 });
 export type PullsSearch = z.infer<typeof pullsSearch>;
 export const PULLS_DEFAULTS: PullsSearch = pullsSearch.parse({});
+
+/** The guided review screen: which step is open (1-based, so the URL reads naturally). */
+export const reviewSearch = z.object({ step: z.number().int().min(1).default(1) });
+export type ReviewSearch = z.infer<typeof reviewSearch>;
+export const REVIEW_DEFAULTS: ReviewSearch = reviewSearch.parse({});

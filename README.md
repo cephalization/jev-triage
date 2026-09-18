@@ -38,6 +38,9 @@ the issue done, `c` claims, `x` toggles done, `1`–`6` set the category, `/` se
   the docker shim), for Postgres.
 - A TypeSafe API key ([docs.typesafe.ai](https://docs.typesafe.ai)).
 - Optionally a GitHub token, for pull request sync and higher API rate limits.
+- Optionally [celld](https://celld.dev) (`curl -fsSL celld.dev/install.sh | sh`). When it is on
+  the PATH, `vp run dev` also starts the guided-review environment (`apps/reviewer`); without
+  it, reviews run inside the API process.
 
 ## Quick start
 
@@ -112,6 +115,7 @@ deliberately small (100 issues) so trying a large repository costs cents, not do
 | ----------------- | ------------------------------------------------------------------------------ |
 | `apps/web`        | React dashboard (Vite+, shadcn/ui, Zero client)                                |
 | `apps/api`        | Hono server: Zero query and mutate endpoints, GitHub sync, classifier worker   |
+| `apps/reviewer`   | Guided-review environment: a celld cell running the pi SDK against a provider  |
 | `packages/schema` | Zero schema, client-safe mutators, synced queries, effective-value helper      |
 | `packages/triage` | TypeSafe question builders, the pure `decide()` policy, priority, calibration  |
 | `db/migrations`   | Plain SQL, applied in order by `vp run migrate` (and on every `vp run dev`)    |
@@ -130,6 +134,14 @@ and tested with canned answers, so no network is needed for the test suite.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how sync, classification, feedback and the
 triage queue fit together, and `CLAUDE.md` for the working rules if you use a coding agent.
+
+## Guided reviews
+
+Open a pull request, press "Generate guided review", then "Open review". jev classifies every
+changed file (role, risk, how carefully to read it, whether the change starts there), the
+configured model writes an ordered walkthrough on top of that proposal, and the review screen
+walks you through it step by step with the diffs. The review is shared; the checkmarks are
+yours. Providers, keys and the default model live under System, for admins.
 
 ## License
 
