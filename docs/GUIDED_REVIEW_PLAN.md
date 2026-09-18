@@ -91,9 +91,10 @@ A `review` job fetches the pull request at its head commit and runs a headless a
 - **One runner.** The prompts, retry and validation live in `packages/triage/src/review`. The
   reviewer cell (`apps/reviewer`) is a celld Durable Object per review that runs the pi SDK
   (`@earendil-works/pi-ai`, with the Anthropic, OpenAI and OpenRouter providers registered and
-  explicit keys); `REVIEW_CELL_URL` points the API at it, and `vp run dev` starts it when celld
-  is installed. Without the cell generation is refused with that reason; there is no in-process
-  runner. The diff comes from GitHub's pull request diff endpoint with the server token.
+  explicit keys); `REVIEW_CELL_URL` points the API at it. The cell runs as the `reviewer` compose service
+  (`ghcr.io/denoland/celld`) on a bundle `vp run dev` builds with esbuild and keeps rebuilding;
+  no binary is installed. Without the cell generation is refused with that reason; there is no
+  in-process runner. The diff comes from GitHub's pull request diff endpoint with the server token.
   Ten-minute timeout, one run in flight per pull request, orphaned runs failed on restart.
 - **Isolation.** The cell is the agent's environment: a Durable Object per review with its own
   storage, no process, no shell, network only to the provider. That is enough for a diff-only

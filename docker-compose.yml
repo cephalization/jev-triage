@@ -16,6 +16,29 @@ services:
       timeout: 2s
       retries: 30
 
+  # The reviewer cell: celld (Durable Objects, workerd) from the published image, running the
+  # bundle the host builds into apps/reviewer/dist. It reaches the API and Phoenix through the
+  # host and the compose network; the API reaches it on 9876.
+  reviewer:
+    image: ghcr.io/denoland/celld:v0.5.0
+    command:
+      - dev
+      - /app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "9876"
+      - --watch-ignore
+      - .celld/**
+    ports:
+      - "9876:9876"
+    volumes:
+      - ./apps/reviewer/wrangler.jsonc:/app/wrangler.jsonc:ro
+      - ./apps/reviewer/dist:/app/dist:ro
+      - reviewer_state:/app/.celld
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # Arize Phoenix: traces of every guided review (jev calls, agent turns, tool calls, cost).
   # UI and OTLP/HTTP on 7006, OTLP/gRPC on 7004; SQLite under the phoenix_data volume.
   phoenix:
@@ -31,3 +54,4 @@ services:
 volumes:
   pgdata:
   phoenix_data:
+  reviewer_state:

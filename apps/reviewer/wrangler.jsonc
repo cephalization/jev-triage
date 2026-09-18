@@ -1,10 +1,12 @@
-// The reviewer cell. `celld dev . --port 9876` runs it locally (state under .celld/dev);
-// `celld deploy . --bucket …` ships it to a fleet. One ReviewRun cell per guided review, one
-// RepoSnapshot per repository commit, one RepoIndex per repository (the ledger the settings
-// page reads).
+// The reviewer cell. It runs in Docker from docker-compose.yml (service `reviewer`, the
+// published ghcr.io/denoland/celld image) on a bundle the host builds with esbuild:
+// `vp run dev` builds once, then watches. `celld deploy . --bucket …` ships the same bundle to
+// a fleet. One ReviewRun cell per guided review, one RepoSnapshot per repository commit, one
+// RepoIndex per repository (the ledger the settings page reads).
 {
   "name": "typeful-reviewer",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "no_bundle": true,
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": {

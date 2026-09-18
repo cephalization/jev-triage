@@ -282,7 +282,9 @@ const rerankBody = z.object({
 app.post("/api/internal/rerank", async (c) => {
   const token = c.req.header("x-reviewer-token") ?? null;
   const host = c.req.header("host") ?? "";
-  const local = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
+  // Loopback, or the Docker host alias the compose-run cell arrives through. Anything further
+  // away must carry REVIEWER_TOKEN.
+  const local = /^(127\.0\.0\.1|localhost|\[::1\]|host\.docker\.internal)(:\d+)?$/.test(host);
   if (env.reviewCellToken ? token !== env.reviewCellToken : !local)
     return c.json({ error: "reviewer only" }, 403);
   if (!systemOne) return c.json({ error: "no classifier configured" }, 503);

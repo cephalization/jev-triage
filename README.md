@@ -35,12 +35,11 @@ the issue done, `c` claims, `x` toggles done, `1`–`6` set the category, `/` se
   `irm https://vite.plus/ps1 | iex`). Node and the package manager are pinned in `package.json`
   and fetched by Vite+ on first use, so nothing else needs to be installed.
 - A Docker-compatible CLI that provides `docker compose` (Docker Desktop, OrbStack, Podman with
-  the docker shim), for Postgres and for Arize Phoenix, which traces every guided review.
+  the docker shim), for Postgres, the reviewer cell and Arize Phoenix.
 - A TypeSafe API key ([docs.typesafe.ai](https://docs.typesafe.ai)).
 - Optionally a GitHub token, for pull request sync and higher API rate limits.
-- Optionally [celld](https://celld.dev) (`curl -fsSL celld.dev/install.sh | sh`). When it is on
-  the PATH, `vp run dev` also starts the guided-review environment (`apps/reviewer`); without
-  it, reviews run inside the API process.
+- Nothing else: the review environment ([celld](https://celld.dev)) and Phoenix run from the
+  same compose file.
 
 ## Quick start
 

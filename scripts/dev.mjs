@@ -2,7 +2,7 @@
 // Usage: vp run dev   (Ctrl-C stops everything). Env comes from the root .env.
 // With --emulate (vp run dev:emulate) the emulate.dev GitHub emulator starts first and sign-in
 // is pointed at it, so no GitHub OAuth app or account is needed; see scripts/emulate-env.mjs.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { EMULATED_ADMIN_TOKEN, EMULATOR_URL, emulateEnv } from "./emulate-env.mjs";
 
@@ -68,50 +68,19 @@ async function waitFor(url, ms = 20_000) {
   return false;
 }
 
-await once("postgres", "docker", ["compose", "up", "-d", "--wait"]);
+// The reviewer cell runs in Docker on a bundle built here; build before compose starts it.
+await once("reviewer build", "pnpm", ["--filter", "@triage/reviewer", "build"]);
+await once("docker", "docker", ["compose", "up", "-d", "--wait"]);
 env.PHOENIX_COLLECTOR_ENDPOINT ||= "http://localhost:7006";
 console.log(`[dev] Phoenix traces at ${env.PHOENIX_COLLECTOR_ENDPOINT}`);
+env.REVIEW_CELL_URL ||= `http://127.0.0.1:${env.REVIEWER_PORT || "9876"}`;
+console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (docker)`);
 await once("migrate", "pnpm", ["--filter", "@triage/api", "migrate"]);
 
 const children = [];
 
-/** The reviewer cell runs under celld when it is installed; otherwise reviews run in the API. */
-function hasCelld() {
-  try {
-    execFileSync("sh", ["-c", "command -v celld"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-const reviewerPort = env.REVIEWER_PORT || "9876";
-if (hasCelld()) {
-  env.REVIEW_CELL_URL ||= `http://127.0.0.1:${reviewerPort}`;
-  children.push(
-    run(
-      "reviewer",
-      "celld",
-      [
-        "dev",
-        "apps/reviewer",
-        "--port",
-        reviewerPort,
-        "--watch-ignore",
-        "node_modules/**",
-        "--watch-ignore",
-        ".celld/**",
-      ],
-      {
-        env: { ...env, PATH: `${root}apps/reviewer/node_modules/.bin:${env.PATH}` },
-      },
-    ),
-  );
-  console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (celld)`);
-} else {
-  console.log(
-    "[dev] celld not found; guided reviews are unavailable until it is installed: curl -fsSL celld.dev/install.sh | sh",
-  );
-}
+// Rebuild the cell's bundle on every save; celld in Docker reloads it from the bind mount.
+children.push(run("reviewer", "pnpm", ["--filter", "@triage/reviewer", "dev"]));
 
 if (emulate) {
   children.push(run("emulate", "pnpm", ["--filter", "@triage/api", "emulate"]));

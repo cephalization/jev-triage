@@ -37,9 +37,9 @@ if (env.phoenixEndpoint) {
 /** The OpenInference tracer; context attributes (session, user) land on every span it starts. */
 export const tracer = new OITracer({ tracer: trace.getTracer("typeful-api") });
 
-/** The collector the cell should report to, or null when tracing is off. */
+/** The collector the cell should report to, as the cell sees it, or null when tracing is off. */
 export const traceTarget = env.phoenixEndpoint
-  ? { endpoint: env.phoenixEndpoint, project: env.phoenixProject }
+  ? { endpoint: env.reviewCellPhoenixUrl, project: env.phoenixProject }
   : null;
 
 /** Headers carrying the active span as W3C `traceparent`, for a request to the cell. */

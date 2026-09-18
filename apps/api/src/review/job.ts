@@ -217,15 +217,7 @@ async function driveReview(
           apiBase: env.githubSyncApiUrl,
         }),
       agent: (snap) =>
-        cellAgent(
-          cell,
-          row.id,
-          row.repo_id,
-          provider,
-          row.model,
-          `http://127.0.0.1:${env.port}`,
-          snap,
-        ),
+        cellAgent(cell, row.id, row.repo_id, provider, row.model, env.reviewCellApiUrl, snap),
       classify: async (intent, files) => {
         const c = await classifyFiles(systemOne, row.repo_id, intent, files);
         await storeFileRows(row.id, c);
