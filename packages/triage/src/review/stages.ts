@@ -1,6 +1,6 @@
 import { z } from "zod";
-import type { ReviewGroup } from "./groups.ts";
-import { renderPatch, type PatchFile } from "./patch.ts";
+import { ANNOTATION_KINDS, annotationSchema, type ReviewGroup } from "./groups.ts";
+import { anchorLines, numberedDiff, renderFiles, renderPatch, type PatchFile } from "./patch.ts";
 import type { ReviewIntent } from "./prompt.ts";
 
 /**
@@ -24,19 +24,40 @@ export type StepSkeleton = z.infer<typeof stepSkeletonSchema>;
 export const skeletonSchema = z.object({ steps: z.array(stepSkeletonSchema).min(1).max(10) });
 
 export const narrativeSchema = z.object({
-  summary: z.string().min(1).max(2000),
-  impact: z.string().max(1500).default(""),
-  findings: z
-    .array(
-      z.object({
-        severity: z.enum(["blocker", "concern", "note"]),
-        text: z.string().min(1).max(600),
-      }),
-    )
-    .max(8)
-    .default([]),
+  /** One paragraph: what the step is for and how it works. */
+  summary: z.string().min(1).max(1200),
+  annotations: z.array(annotationSchema).max(12).default([]),
 });
 export type Narrative = z.infer<typeof narrativeSchema>;
+
+/**
+ * The narrative schema for one step: every annotation must name one of the step's files and a
+ * line that is in its diff on the cited side, or 0 for the file. A wrong anchor is a validation
+ * error, so the retry tells the model exactly which comment to fix.
+ */
+export function narrativeSchemaFor(files: readonly PatchFile[]) {
+  const anchors = new Map(files.map((f) => [f.path, anchorLines(f)]));
+  return narrativeSchema.superRefine((n, ctx) => {
+    n.annotations.forEach((a, i) => {
+      const lines = anchors.get(a.path);
+      if (!lines) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["annotations", i, "path"],
+          message: `annotation ${i + 1} names ${a.path}, which is not one of this step's files`,
+        });
+        return;
+      }
+      if (a.line === 0) return;
+      if (!(a.side === "old" ? lines.old : lines.new).has(a.line))
+        ctx.addIssue({
+          code: "custom",
+          path: ["annotations", i, "line"],
+          message: `annotation ${i + 1}: ${a.side} line ${a.line} of ${a.path} is not in the diff; cite a number shown in <diff> on that side, or 0 for the whole file`,
+        });
+    });
+  });
+}
 
 /** The first JSON object in a reply, fences and prose stripped. */
 export function extractJson<T>(output: string, schema: z.ZodType<T>): T {
@@ -138,25 +159,31 @@ export interface NarrativeRequest {
 export const NARRATIVE_BODY_BUDGET = 80_000;
 
 export function buildNarrativePrompt(req: NarrativeRequest, previousError: string | null): string {
-  const rendered = renderPatch(req.files.map((f) => f.text).join(""), NARRATIVE_BODY_BUDGET);
+  const rendered = renderFiles(req.files, NARRATIVE_BODY_BUDGET, numberedDiff);
+  const kinds = Object.entries(ANNOTATION_KINDS)
+    .map(([k, v]) => `   - "${k}": ${v}.`)
+    .join("\n");
   const sections = [
-    `You are reviewing one step of a pull request as a senior engineer, for a colleague who has NOT opened the diff. Your job is to do the review, not to tell them where to look. Telling the reader to "read this first" or "check X" is a failure; say what you found.
+    `You are reviewing one step of a pull request as a senior engineer, for a colleague who has NOT opened the diff yet. Give them the purpose of this step, then leave the inline comments that get them thinking. Telling the reader to "check X" or "read this first" is a failure; say what you see.
 
-Write three parts:
-1. "summary", 3 to 6 sentences: what this step changes and how it works. Name the mechanism: the new state, contract, data flow or algorithm, and how the pieces connect. Say why this approach, and what behaviour changes for callers or users. Do not narrate the diff line by line.
-2. "impact", 1 to 3 sentences: what else this touches. Which callers, contracts, data, configuration or tests depend on what changed, and whether they were updated. Say "nothing outside this step" when that is true.${
-      req.tools
-        ? " Use grep to find the callers and definitions of changed symbols and read_file to see how they use them; report what you found, not what you assume. rank_files picks the few files worth reading when grep returns many."
-        : ""
-    }
-3. "findings", 0 to 6 items, most important first: the concrete observations you would leave as review comments. A bug, a missing case, an invariant that can break, a contract that changed without its callers, a missing or weak test, a name or an API that will mislead. Each names the file and the symbol or line it is about, and says why it matters. severity "blocker" for what must change before merge, "concern" for what deserves a reply, "note" for what the author should know. An empty list is fine when the step is clean; say so in the summary.
+Write two parts:
+1. "summary": ONE paragraph of 2 to 4 sentences. What this step changes, why it exists, and how it fits the other steps. Name the mechanism (the new state, contract, data flow or algorithm) in a sentence; do not walk through the diff.
+2. "annotations": 0 to 10 inline comments, most important first, each anchored to one line of this step's diff. Kinds:
+${kinds}
+   Each comment stands alone: what you see and why it matters, in 1 to 3 sentences. Do not restate the summary, do not describe what a line does, do not praise. An empty list is right when the step is clean.${
+     req.tools
+       ? "\n   Before you call something a bug, use grep to find the callers and definitions of the changed symbols and read_file to see how they use them; report what you found, not what you assume. rank_files picks the few files worth reading when grep returns many."
+       : ""
+   }
+
+Anchoring: every line of <diff> is prefixed with its old and new line numbers (\`old new |line\`). Cite "side":"new" with the new number for added and unchanged lines, "side":"old" with the old number for removed lines. Use "line":0 to comment on the file as a whole.
 
 Rules:
 - ${STE_RULES}
 - Stay inside this step; the other steps are listed so you can refer to them by name without repeating them.
 - Never invent what an omitted body contains; reason from its path, status, counts and the intent.
 - Respond with ONLY this JSON shape, no prose and no code fences:
-  {"summary":"...","impact":"...","findings":[{"severity":"concern","text":"..."}]}`,
+  {"summary":"...","annotations":[{"path":"src/a.ts","side":"new","line":42,"kind":"bug","text":"..."}]}`,
     `<intent>\n${renderIntent(req.intent)}\n</intent>`,
     `<steps>\n${req.allSteps.map((s, i) => `${i + 1}. ${s.name}${i === req.index ? " (this step)" : ""}: ${s.intent}`).join("\n")}\n</steps>`,
     `<step>\n${req.index + 1}. ${req.step.name}\n${req.step.intent}\n</step>`,

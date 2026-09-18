@@ -1,7 +1,7 @@
 import {
   buildNarrativePrompt,
   buildSkeletonPrompt,
-  narrativeSchema,
+  narrativeSchemaFor,
   skeletonSchema,
   splitPatch,
   type Narrative,
@@ -185,7 +185,7 @@ export function runNarrative(
     host,
     env,
     (prev) => buildNarrativePrompt(req, prev),
-    narrativeSchema,
+    narrativeSchemaFor(req.files),
     `${req.step.name}: ${req.step.intent}`,
   );
 }

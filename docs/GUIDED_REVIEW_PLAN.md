@@ -134,7 +134,8 @@ The agent writes narrative; jev supplies structure it can rely on, cheaply and r
 
 ## Phase 5: review UI (done)
 
-- `/pulls/$pullId/review?step=n`: a rail with the step counter, name, narrative and file chips
+- `/pulls/$pullId/review?step=n`: a rail with the step counter, name, purpose paragraph, the
+  model's inline comments (click to jump to the line) and file chips
   (role tag with jev's answers in the tooltip), previous and next, "Mark reviewed"; the diff pane
   renders that step's files with `@pierre/diffs`, lockfiles, generated output, very large diffs
   and files jev said to skim collapsed to a bar. Keys: `]`/`n`, `[`/`p`, `m`, Esc.

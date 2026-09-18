@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vite-plus/test";
 import {
+  anchorLines,
   askJson,
   buildAssignQuestions,
   buildAssignState,
@@ -12,6 +13,8 @@ import {
   foldChanges,
   groupsFromAssignments,
   narrativeSchema,
+  narrativeSchemaFor,
+  numberedDiff,
   reusableSteps,
   skeletonSchema,
   splitPatch,
@@ -73,7 +76,7 @@ describe("skeleton and narrative prompts", () => {
     ).toContain("rejected: bad");
   });
 
-  test("narrative sees only its step's files and the other steps by name", () => {
+  test("narrative sees only its step's files, numbered, and the other steps by name", () => {
     const p = buildNarrativePrompt(
       {
         intent,
@@ -88,18 +91,69 @@ describe("skeleton and narrative prompts", () => {
     );
     expect(p).toContain("1. Add the widget (this step)");
     expect(p).toContain("2. Tests:");
-    expect(p).toContain("+core");
+    expect(p).toContain("          1 |+core");
+    expect(p).toContain("    1       |-old");
     expect(p).not.toContain("+test");
     expect(p).not.toContain("rank_files");
-    expect(p).toContain('"findings"');
-    expect(p).toContain("do the review, not to tell them where to look");
+    expect(p).toContain('"annotations"');
+    expect(p).toContain('"kind":"bug"');
+    expect(p).toContain("ONE paragraph");
     const parsed = narrativeSchema.parse({
       summary: "s",
-      findings: [{ severity: "concern", text: "adapter.py: retries never back off" }],
+      annotations: [{ path: "src/core.ts", kind: "question", text: "why?" }],
     });
-    expect(parsed.impact).toBe("");
-    expect(parsed.findings).toHaveLength(1);
-    expect(narrativeSchema.parse({ summary: "s" }).findings).toEqual([]);
+    expect(parsed.annotations[0]).toEqual({
+      path: "src/core.ts",
+      side: "new",
+      line: 0,
+      kind: "question",
+      text: "why?",
+    });
+    expect(narrativeSchema.parse({ summary: "s" }).annotations).toEqual([]);
+  });
+
+  test("numbered diff and anchors follow the hunk headers", () => {
+    const f = splitPatch(
+      "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -10,3 +12,4 @@\n keep\n-gone\n+new1\n+new2\n tail\n",
+    )[0]!;
+    expect(numberedDiff(f).split("\n").slice(3)).toEqual([
+      "@@ -10,3 +12,4 @@",
+      "   10    12 | keep",
+      "   11       |-gone",
+      "         13 |+new1",
+      "         14 |+new2",
+      "   12    15 | tail",
+      "",
+    ]);
+    const a = anchorLines(f);
+    expect([...a.old]).toEqual([10, 11, 12]);
+    expect([...a.new]).toEqual([12, 13, 14, 15]);
+  });
+
+  test("narrativeSchemaFor rejects anchors that are not in the step's diff", () => {
+    const schema = narrativeSchemaFor([files[0]!]);
+    const ok = (a: object) => schema.safeParse({ summary: "s", annotations: [a] });
+    expect(ok({ path: "src/core.ts", side: "new", line: 1, kind: "bug", text: "t" }).success).toBe(
+      true,
+    );
+    expect(ok({ path: "src/core.ts", side: "old", line: 1, kind: "nit", text: "t" }).success).toBe(
+      true,
+    );
+    expect(ok({ path: "src/core.ts", line: 0, kind: "consideration", text: "t" }).success).toBe(
+      true,
+    );
+    const wrongLine = ok({ path: "src/core.ts", side: "new", line: 7, kind: "bug", text: "t" });
+    expect(wrongLine.success).toBe(false);
+    if (!wrongLine.success)
+      expect(wrongLine.error.issues[0]!.message).toContain(
+        "new line 7 of src/core.ts is not in the diff",
+      );
+    const wrongSide = ok({ path: "src/core.ts", side: "old", line: 2, kind: "bug", text: "t" });
+    expect(wrongSide.success).toBe(false);
+    const wrongFile = ok({ path: "src/other.ts", line: 0, kind: "bug", text: "t" });
+    expect(wrongFile.success).toBe(false);
+    if (!wrongFile.success)
+      expect(wrongFile.error.issues[0]!.message).toContain("not one of this step's files");
   });
 
   test("extractJson and askJson validate and retry once", async () => {

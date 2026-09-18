@@ -1,13 +1,21 @@
 import { parsePatchFiles } from "@pierre/diffs";
 import type { FileDiffMetadata } from "@pierre/diffs/react";
 import { useQuery, useZero } from "@rocicorp/zero/react";
-import { mutators, queries } from "@triage/schema";
+import { mutators, queries, type ReviewAnnotationJson } from "@triage/schema";
 import { splitPatch } from "@triage/triage/review";
 import { cn } from "cn";
 import { ArrowLeft, Check, ChevronLeft, ChevronRight, ExternalLink } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AvatarStack } from "../components/Avatar.tsx";
-import { collapseReason, Counts, DiffFile, FileName, splitPath } from "../components/DiffFile.tsx";
+import {
+  ANNOTATION_COLORS,
+  collapseReason,
+  Counts,
+  DiffFile,
+  FileName,
+  splitPath,
+  type DiffAnnotation,
+} from "../components/DiffFile.tsx";
 import { SectionLabel, Tag } from "../components/Marks.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
@@ -47,6 +55,7 @@ interface Step {
   name: string;
   summary: string;
   files: string[];
+  annotations?: ReviewAnnotationJson[];
   impact?: string;
   findings?: { severity: "blocker" | "concern" | "note"; text: string }[];
   /** The synthetic "changed since generation" step cannot be marked. */
@@ -126,6 +135,25 @@ export function ReviewView() {
 
   const current = Math.min(Math.max(1, search.step), Math.max(1, steps.length)) - 1;
   const step = steps[current] ?? null;
+  // The step's inline comments, keyed for the rail, grouped by the file they sit in.
+  const annotations = useMemo(() => {
+    const all: DiffAnnotation[] = (step?.annotations ?? []).map((a, i) => ({
+      ...a,
+      key: `${current}-${i}`,
+    }));
+    const byPath = new Map<string, DiffAnnotation[]>();
+    for (const a of all) byPath.set(a.path, [...(byPath.get(a.path) ?? []), a]);
+    return { all, byPath };
+  }, [step, current]);
+  const annotationNodes = useRef(new Map<string, HTMLElement>());
+  const onAnnotationNode = useCallback((key: string, el: HTMLElement | null) => {
+    if (el) annotationNodes.current.set(key, el);
+    else annotationNodes.current.delete(key);
+  }, []);
+  const jumpTo = useCallback((a: DiffAnnotation) => {
+    const target = annotationNodes.current.get(a.key) ?? document.getElementById(`diff-${a.path}`);
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, []);
   const goTo = useCallback(
     (index: number) =>
       void navigate({
@@ -303,6 +331,35 @@ export function ReviewView() {
                       <span className="text-foreground/80">{step.impact}</span>
                     </p>
                   )}
+                  {annotations.all.length > 0 && (
+                    <ol className="flex flex-col gap-1">
+                      {annotations.all.map((a) => (
+                        <li key={a.key}>
+                          <button
+                            type="button"
+                            className="flex w-full gap-2 rounded-md px-1.5 py-1 text-left text-sm leading-5 transition-colors hover:bg-accent"
+                            onClick={() => jumpTo(a)}
+                          >
+                            <span
+                              className="mt-1.5 size-2 shrink-0 rounded-full"
+                              style={{ backgroundColor: ANNOTATION_COLORS[a.kind] }}
+                              title={a.kind}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate font-mono text-2xs text-muted-foreground">
+                                {splitPath(a.path)[0]}
+                                {a.line > 0 ? `:${a.line}` : ""}
+                                {a.side === "old" && a.line > 0 ? " (removed)" : ""}
+                              </span>
+                              <span className="line-clamp-3 text-pretty text-foreground/90">
+                                {a.text}
+                              </span>
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
                   {step.findings && step.findings.length > 0 && (
                     <ol className="flex flex-col gap-1.5">
                       {step.findings.map((f, i) => (
@@ -442,6 +499,8 @@ export function ReviewView() {
                         file={file}
                         added={c?.added ?? 0}
                         removed={c?.removed ?? 0}
+                        annotations={annotations.byPath.get(path)}
+                        onAnnotationNode={onAnnotationNode}
                         reason={collapseReason(
                           path,
                           (c?.added ?? 0) + (c?.removed ?? 0),

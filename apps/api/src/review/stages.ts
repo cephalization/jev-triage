@@ -223,8 +223,7 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
           }),
         );
         g.summary = out.summary;
-        g.impact = out.impact || undefined;
-        g.findings = out.findings.length > 0 ? out.findings : undefined;
+        g.annotations = out.annotations.length > 0 ? out.annotations : undefined;
       },
     ),
   );

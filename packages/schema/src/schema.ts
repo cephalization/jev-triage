@@ -226,10 +226,21 @@ const pull = table("pull")
   })
   .primaryKey("id");
 
+export type ReviewAnnotationJson = {
+  path: string;
+  /** `new` numbers for added and unchanged lines, `old` for removed; line 0 is the whole file. */
+  side: "old" | "new";
+  line: number;
+  kind: "bug" | "question" | "consideration" | "nit";
+  text: string;
+};
+
 export type ReviewGroupJson = {
   name: string;
   summary: string;
   files: string[];
+  annotations?: ReviewAnnotationJson[];
+  /** Older reviews were written with these instead of annotations; rows are history. */
   impact?: string;
   findings?: { severity: "blocker" | "concern" | "note"; text: string }[];
 };

@@ -14,7 +14,8 @@ function memoryStore(): AgentStore {
   };
 }
 
-const GROUPS = '{"summary":"Adds the widget.","impact":"","findings":[]}';
+const GROUPS =
+  '{"summary":"Adds the widget.","annotations":[{"path":"src/a.ts","side":"new","line":1,"kind":"question","text":"Why y?"}]}';
 
 /**
  * A fake provider speaking the two streaming shapes the SDK uses here: Anthropic messages
@@ -182,7 +183,9 @@ describe("pi runner", () => {
     expect(out.status).toBe("done");
     if (out.status !== "done") throw new Error("unreachable");
     expect(out.result.summary).toBe("Adds the widget.");
-    expect(out.result.findings).toEqual([]);
+    expect(out.result.annotations).toEqual([
+      { path: "src/a.ts", side: "new", line: 1, kind: "question", text: "Why y?" },
+    ]);
     expect(out.inputTokens).toBe(20);
     expect(out.outputTokens).toBe(10);
     expect(out.priced).toBe(true);
