@@ -20,6 +20,7 @@ github:
       name: typeful-triage (local)
       redirect_uris:
         - http://localhost:5173/api/auth/github/callback
+        - http://localhost:8787/api/auth/github/callback
   repos:
     - owner: octocat
       name: hello-world
