@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { runNarrative, runSkeleton, type NarrativeBody, type SkeletonBody } from "./review.ts";
-import { Tracer } from "@triage/triage/trace";
 import { snapshotClient, type SnapshotClient } from "./agent.ts";
+import { tracingFor } from "./otel.ts";
 import { RepoSnapshot, type SnapshotStats } from "./snapshot.ts";
 
 export { RepoSnapshot };
@@ -90,18 +90,18 @@ export class ReviewRun extends DurableObject<Env> {
     // The key is never stored: only what is needed to answer a later GET.
     await this.ctx.storage.put("run", rec);
     try {
+      const tracing = tracingFor(body.trace);
       const host = {
         snapshot: this.#snapshot(body),
         callback: body.callback,
         repo: body.repo,
-        tracer: body.trace
-          ? new Tracer(body.trace.endpoint, body.trace.project, "typeful-reviewer")
-          : Tracer.off("typeful-reviewer"),
+        tracer: tracing?.otelTracer ?? null,
       };
+      const env = { request, tracing, execution: this.ctx };
       const out =
         stage === "skeleton"
-          ? await runSkeleton(body as SkeletonBody, host)
-          : await runNarrative(body as NarrativeBody, host);
+          ? await runSkeleton(body as SkeletonBody, host, env)
+          : await runNarrative(body as NarrativeBody, host, env);
       await this.#report(rec);
       return Response.json(out);
     } catch (e) {

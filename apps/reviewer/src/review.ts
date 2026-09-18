@@ -10,8 +10,13 @@ import {
   type SkeletonRequest,
   type StepSkeleton,
 } from "@triage/triage/review";
-import { OI, type Span, type TraceContext } from "@triage/triage/trace";
+import { withRequestSpan, type WorkersTracing } from "@triage/openinference-workers";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions as S,
+} from "@arizeai/openinference-semantic-conventions";
 import { runAgent, type Callback, type ToolHost } from "./agent.ts";
+import type { TraceTarget } from "./otel.ts";
 import { addUsage, NO_USAGE, type CallUsage, type ProviderSpec } from "./pi.ts";
 
 /** The staged calls: the API sends the patch subset and the prompt inputs; the cell adds tools. */
@@ -23,8 +28,8 @@ export interface StagedBody {
   repo: string;
   /** The loaded snapshot the tools read. */
   snapshot: { owner: string; repo: string; sha: string };
-  /** Where this stage's spans go and which span they hang from; null sends nothing. */
-  trace: TraceContext | null;
+  /** Where spans go; the parent comes from the request's `traceparent`. Null sends nothing. */
+  trace: TraceTarget | null;
 }
 
 export interface SkeletonBody extends StagedBody {
@@ -43,48 +48,63 @@ export interface StagedResult<T> extends CallUsage {
   toolCalls: number;
 }
 
+/** What a stage needs beyond its body: the inbound request for its parent, and the cell's lifecycle. */
+export interface StageEnv {
+  request: Request;
+  tracing: WorkersTracing | null;
+  execution: { waitUntil(promise: Promise<unknown>): void } | null;
+}
+
 async function staged<T>(
   name: string,
   body: StagedBody,
   host: ToolHost,
+  env: StageEnv,
   build: (previousError: string | null) => string,
   schema: Parameters<typeof askJson<T>>[1],
   input: string,
 ): Promise<StagedResult<T>> {
-  let usage: CallUsage = NO_USAGE;
-  let toolCalls = 0;
-  const parent: Span | TraceContext | null = body.trace;
-  const span = host.tracer.start(name, "AGENT", parent, {
-    [OI.inputValue]: input,
-    [OI.modelName]: body.model,
-  });
-  try {
+  const run = async (): Promise<StagedResult<T>> => {
+    let usage: CallUsage = NO_USAGE;
+    let toolCalls = 0;
     const result = await askJson(build, schema, async (prompt) => {
-      const r = await runAgent(body.provider, body.model, prompt, host, span);
+      const r = await runAgent(body.provider, body.model, prompt, host);
       usage = addUsage(usage, r);
       toolCalls += r.toolCalls;
       return r.text;
     });
-    host.tracer.end(span, {
-      [OI.outputValue]: JSON.stringify(result),
-      [OI.outputMime]: "application/json",
-      [OI.promptTokens]: usage.inputTokens,
-      [OI.completionTokens]: usage.outputTokens,
-      [OI.costTotal]: usage.costUsd,
-      "review.tool_calls": toolCalls,
-    });
     return { result, ...usage, toolCalls };
-  } catch (e) {
-    host.tracer.end(span, {}, e);
-    throw e;
-  } finally {
-    await host.tracer.flush();
-  }
+  };
+  if (!env.tracing) return run();
+  return withRequestSpan(
+    {
+      tracer: env.tracing.tracer,
+      request: env.request,
+      name,
+      kind: OpenInferenceSpanKind.AGENT,
+      attributes: { [S.INPUT_VALUE]: input, [S.LLM_MODEL_NAME]: body.model },
+      execution: env.execution,
+      flush: env.tracing.flush,
+    },
+    async (span) => {
+      const out = await run();
+      span.setAttributes({
+        [S.OUTPUT_VALUE]: JSON.stringify(out.result),
+        [S.OUTPUT_MIME_TYPE]: "application/json",
+        [S.LLM_TOKEN_COUNT_PROMPT]: out.inputTokens,
+        [S.LLM_TOKEN_COUNT_COMPLETION]: out.outputTokens,
+        [S.LLM_COST_TOTAL]: out.costUsd,
+        "review.tool_calls": out.toolCalls,
+      });
+      return out;
+    },
+  );
 }
 
 export function runSkeleton(
   body: SkeletonBody,
   host: ToolHost,
+  env: StageEnv,
 ): Promise<StagedResult<{ steps: StepSkeleton[] }>> {
   const req: SkeletonRequest = {
     ...body.request,
@@ -96,6 +116,7 @@ export function runSkeleton(
     "skeleton",
     body,
     host,
+    env,
     (prev) => buildSkeletonPrompt(req, prev),
     skeletonSchema,
     `${req.intent.title} (${req.files.length} files)`,
@@ -105,6 +126,7 @@ export function runSkeleton(
 export function runNarrative(
   body: NarrativeBody,
   host: ToolHost,
+  env: StageEnv,
 ): Promise<StagedResult<Narrative>> {
   const req: NarrativeRequest = {
     ...body.request,
@@ -115,6 +137,7 @@ export function runNarrative(
     `narrative: ${req.step.name}`,
     body,
     host,
+    env,
     (prev) => buildNarrativePrompt(req, prev),
     narrativeSchema,
     `${req.step.name}: ${req.step.intent}`,

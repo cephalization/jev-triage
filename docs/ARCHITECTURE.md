@@ -138,14 +138,20 @@ through Zero, and fetches the patch from `/api/reviews/:id/patch`.
 
 ### Traces
 
-`packages/triage/src/trace.ts` is a small OpenInference tracer over OTLP/HTTP protobuf that
-runs in Node and in the cell with nothing but `fetch`. The API opens a root span per review
-(`session.id` is the review id, `user.id` the requester) and a child per stage; jev requests
-are LLM spans with their state and answers; the cell receives the parent's context in each
-stage request and adds an agent span per stage, an LLM span per model turn with messages,
-tokens and cost, and a tool span per call. The `rank_files` tool carries the context back so
-the reranker span sits under the tool call. Everything ships to `PHOENIX_COLLECTOR_ENDPOINT`;
-without it the tracer records nothing.
+One OpenTelemetry trace per review, with the standard SDKs on both sides. The API
+(`apps/api/src/review/otel.ts`) runs `@opentelemetry/sdk-trace-node` with the stock OTLP
+protobuf exporter and `@arizeai/openinference-core`'s tracer: a root agent span per review
+with the review as `session.id` and the requester as `user.id` set on the context, so the
+OpenInference tracer copies them onto every span beneath; a chain span per stage; and jev
+requests as LLM spans with their state and answers, nested by the async context. The cell
+runs `packages/openinference-workers`, the same stack arranged for workerd: an
+`AsyncLocalStorage` context manager, a fetch exporter, and a request span per stage whose
+export rides on the Durable Object's `waitUntil`. Every model turn is an LLM span with
+messages, tools, tokens and cost; every tool call is a tool span. The trace crosses the
+API→cell hop and the `rank_files` callback as a W3C `traceparent` header injected and
+extracted with the OpenTelemetry propagator, so the reranker span sits under the tool call
+that asked. Everything ships to `PHOENIX_COLLECTOR_ENDPOINT`; without it no provider is
+registered and the tracers are no-ops.
 
 ### Presence
 

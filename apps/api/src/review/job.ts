@@ -1,6 +1,12 @@
 import type { SystemOne } from "@triage/triage";
 import { splitPatch, type ReviewGroup, type ReviewIntent } from "@triage/triage/review";
-import { OI, Tracer } from "@triage/triage/trace";
+import { setSession, setUser } from "@arizeai/openinference-core";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions as S,
+} from "@arizeai/openinference-semantic-conventions";
+import { context, SpanStatusCode } from "@opentelemetry/api";
+import { flushTraces, tracer } from "./otel.ts";
 import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 import { makeOctokit } from "../github/sync.ts";
@@ -133,13 +139,34 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
   if (inFlight.has(row.pull_id)) return;
   inFlight.add(row.pull_id);
   const t0 = Date.now();
-  const tracer = new Tracer(env.phoenixEndpoint, env.phoenixProject, "typeful-api");
-  const root = tracer.start("guided_review", "AGENT", null, {
-    [OI.sessionId]: row.id,
-    [OI.userId]: row.created_by ?? "",
-    [OI.inputValue]: `${row.repo_id} review ${row.id}`,
-    [OI.metadata]: JSON.stringify({ repo: row.repo_id, pull: row.pull_id, model: row.model }),
-  });
+  // The review is one trace: an agent span with the review as the session and the requester as
+  // the user, both of which the OpenInference tracer copies onto every span beneath.
+  let ctx = setSession(context.active(), { sessionId: row.id });
+  if (row.created_by) ctx = setUser(ctx, { userId: row.created_by });
+  await context.with(ctx, () =>
+    tracer.startActiveSpan(
+      "guided_review",
+      {
+        attributes: {
+          [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.AGENT,
+          [S.INPUT_VALUE]: `${row.repo_id} review ${row.id}`,
+          [S.METADATA]: JSON.stringify({ repo: row.repo_id, pull: row.pull_id, model: row.model }),
+        },
+      },
+      (root) => driveReview(row, deps, root, t0),
+    ),
+  );
+  inFlight.delete(row.pull_id);
+  await flushTraces();
+}
+
+/** The job body, under the review's root span. */
+async function driveReview(
+  row: ReviewRow,
+  deps: JobDeps,
+  root: import("@opentelemetry/api").Span,
+  t0: number,
+): Promise<void> {
   const setPhase = async (phase: Phase | null, groups: ReviewGroup[] | null) => {
     if (groups)
       await sql`update guided_review set phase = ${phase}, groups_json = ${sql.json(groups)} where id = ${row.id}`;
@@ -198,16 +225,13 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
           row.model,
           `http://127.0.0.1:${env.port}`,
           snap,
-          tracer,
         ),
-      classify: async (intent, files, trace) => {
-        const c = await classifyFiles(systemOne, row.repo_id, intent, files, trace);
+      classify: async (intent, files) => {
+        const c = await classifyFiles(systemOne, row.repo_id, intent, files);
         await storeFileRows(row.id, c);
         return c;
       },
       onPhase: setPhase,
-      tracer,
-      root,
     });
     const spend = await storeCosts(row, provider, staged.calls);
 
@@ -217,25 +241,26 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
       tool_calls = ${staged.toolCalls}, reused_steps = ${staged.reusedSteps},
       cost_usd = ${spend.costUsd}, priced = ${spend.priced},
       source = 'agent', error = null, finished_at = now() where id = ${row.id}`;
-    tracer.end(root, {
-      [OI.outputValue]: staged.groups.map((g) => g.name).join(" → "),
-      [OI.promptTokens]: staged.inputTokens,
-      [OI.completionTokens]: staged.outputTokens,
-      [OI.costTotal]: spend.costUsd,
+    root.setAttributes({
+      [S.OUTPUT_VALUE]: staged.groups.map((g) => g.name).join(" → "),
+      [S.LLM_TOKEN_COUNT_PROMPT]: staged.inputTokens,
+      [S.LLM_TOKEN_COUNT_COMPLETION]: staged.outputTokens,
+      [S.LLM_COST_TOTAL]: spend.costUsd,
       "review.tool_calls": staged.toolCalls,
       "review.reused_steps": staged.reusedSteps,
     });
+    root.setStatus({ code: SpanStatusCode.OK });
     console.log(
       `[review] ${row.repo_id}#${pull.number}: ${staged.groups.length} steps over ${allFiles.length} files (${staged.reusedSteps} kept), ${staged.inputTokens} in / ${staged.outputTokens} out, ${staged.toolCalls} tool calls, ${spend.priced ? `$${spend.costUsd.toFixed(4)}` : "unpriced"}, ${Date.now() - t0} ms, ${row.model}`,
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn(`[review] ${row.id} failed: ${message}`);
-    if (root.end === null) tracer.end(root, {}, e);
+    root.recordException(e instanceof Error ? e : new Error(message));
+    root.setStatus({ code: SpanStatusCode.ERROR, message });
     await sql`update guided_review set status = 'failed', phase = null, error = ${message.slice(0, 500)}, finished_at = now() where id = ${row.id}`;
   } finally {
-    inFlight.delete(row.pull_id);
-    await tracer.flush();
+    root.end();
   }
 }
 

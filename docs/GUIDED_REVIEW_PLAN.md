@@ -201,11 +201,19 @@ agent writes, in parallel, with the repository within reach.
 ## Phase 9: tracing (done)
 
 Every review is a trace in Arize Phoenix (`docker-compose.yml`, UI and OTLP on 7006, gRPC on
-7004). See ARCHITECTURE → Traces. Notes for the tracer: Phoenix's `/v1/traces` takes protobuf
-only (JSON answers 415), so the shared tracer encodes OTLP by hand rather than pulling the
-OpenTelemetry SDK into the cell's bundle; the OpenTelemetry Node SDK would work in the API but
-not in workerd, and no OpenInference instrumentation exists for pi-ai, so spans are explicit
-either way.
+7004). See ARCHITECTURE → Traces. The API is on `@opentelemetry/sdk-trace-node` with the stock
+protobuf exporter; the first version's hand-rolled tracer is gone. No OpenInference
+instrumentation exists for pi-ai, so the cell's spans are explicit.
+
+## Phase 10: the standard OpenTelemetry stack in the cell (done)
+
+`packages/openinference-workers` is a candidate `@arizeai/openinference-workers`: the stock
+`@opentelemetry/sdk-trace` provider, a `fetch` exporter over `@opentelemetry/otlp-transformer`'s
+protobuf serializer, an `AsyncLocalStorage` context manager (workerd has it under
+`nodejs_compat`), W3C propagation helpers, and `withRequestSpan`, which makes one inbound
+request one span and hands the flush to `waitUntil`. The reviewer cell runs on it: verified
+under celld against Phoenix 20.14 with a 22-span trace nesting API, cell, tool calls, the
+rerank callback into the API and the jev call under it. Its README is written for promotion.
 
 ## Testing
 

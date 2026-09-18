@@ -22,7 +22,12 @@ import {
   isGenerating,
   runReviewJob,
 } from "./review/job.ts";
-import { OI, Tracer } from "@triage/triage/trace";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions as S,
+} from "@arizeai/openinference-semantic-conventions";
+import { context, SpanStatusCode } from "@opentelemetry/api";
+import { contextFromHeaders, flushTraces, tracer } from "./review/otel.ts";
 import { askSystemOne } from "./review/jev.ts";
 import { overBudget, RateLimiter } from "./review/limits.ts";
 import { noul } from "@typesafe-ai/sdk";
@@ -271,15 +276,6 @@ app.post("/api/reviews", async (c) => {
  */
 const rerankBody = z.object({
   repo: z.string().min(3),
-  trace: z
-    .object({
-      endpoint: z.string(),
-      project: z.string(),
-      traceId: z.string(),
-      parentSpanId: z.string().nullable(),
-    })
-    .nullable()
-    .optional(),
   question: z.string().min(1).max(500),
   candidates: z.array(z.string().min(1).max(500)).min(1).max(40),
 });
@@ -292,51 +288,61 @@ app.post("/api/internal/rerank", async (c) => {
   if (!systemOne) return c.json({ error: "no classifier configured" }, 503);
   const parsed = rerankBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "question and candidates required" }, 400);
-  const { repo, question, candidates, trace } = parsed.data;
-  const tracer = trace ? new Tracer(trace.endpoint, trace.project, "typeful-api") : Tracer.off();
-  const span = tracer.start("rank_files", "RERANKER", trace ?? null, {
-    [OI.inputValue]: JSON.stringify({ question, candidates }),
-    [OI.inputMime]: "application/json",
-  });
-  const questions: Record<string, ReturnType<typeof noul>> = {};
-  candidates.forEach((_, i) => {
-    questions[`r${i}`] = noul(
-      `Is \`candidates[${i}]\` likely to contain what the question needs? Judge from the path alone: its directory, name and extension.`,
+  const { repo, question, candidates } = parsed.data;
+  // The cell's tool span is the parent, carried by the W3C traceparent header.
+  return context.with(contextFromHeaders(c.req.raw.headers), () =>
+    tracer.startActiveSpan(
+      "rank_files",
       {
-        true: "The path names the module, type, test or config the question is about, or a direct caller or definition of it",
-        false: "Unrelated area, generated output, or a file the question would not need",
+        attributes: {
+          [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.RERANKER,
+          [S.INPUT_VALUE]: JSON.stringify({ question, candidates }),
+          [S.INPUT_MIME_TYPE]: "application/json",
+        },
       },
-    );
-  });
-  try {
-    const result = await askSystemOne(
-      systemOne,
-      {
-        repoId: repo,
-        kind: "review_rerank",
-        state: { question, candidates: candidates.map((path) => ({ path })) },
-        questions,
-        items: candidates.length,
+      async (span) => {
+        const questions: Record<string, ReturnType<typeof noul>> = {};
+        candidates.forEach((_, i) => {
+          questions[`r${i}`] = noul(
+            `Is \`candidates[${i}]\` likely to contain what the question needs? Judge from the path alone: its directory, name and extension.`,
+            {
+              true: "The path names the module, type, test or config the question is about, or a direct caller or definition of it",
+              false: "Unrelated area, generated output, or a file the question would not need",
+            },
+          );
+        });
+        try {
+          const result = await askSystemOne(systemOne, {
+            repoId: repo,
+            kind: "review_rerank",
+            state: { question, candidates: candidates.map((path) => ({ path })) },
+            questions,
+            items: candidates.length,
+          });
+          const ranked = candidates
+            .map((path, i) => {
+              const a = result.answers[`r${i}`] as { noul?: number } | undefined;
+              return { path, relevance: a?.noul ?? 0 };
+            })
+            .sort((a, b) => b.relevance - a.relevance);
+          span.setAttributes({
+            [S.OUTPUT_VALUE]: JSON.stringify(ranked),
+            [S.OUTPUT_MIME_TYPE]: "application/json",
+          });
+          span.setStatus({ code: SpanStatusCode.OK });
+          return c.json({ ranked });
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          span.recordException(e instanceof Error ? e : new Error(message));
+          span.setStatus({ code: SpanStatusCode.ERROR, message });
+          return c.json({ error: message }, 502);
+        } finally {
+          span.end();
+          void flushTraces();
+        }
       },
-      { tracer, parent: span },
-    );
-    const ranked = candidates
-      .map((path, i) => {
-        const a = result.answers[`r${i}`] as { noul?: number } | undefined;
-        return { path, relevance: a?.noul ?? 0 };
-      })
-      .sort((a, b) => b.relevance - a.relevance);
-    tracer.end(span, {
-      [OI.outputValue]: JSON.stringify(ranked),
-      [OI.outputMime]: "application/json",
-    });
-    await tracer.flush();
-    return c.json({ ranked });
-  } catch (e) {
-    tracer.end(span, {}, e);
-    await tracer.flush();
-    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
-  }
+    ),
+  );
 });
 
 /** What the reviewer cells hold for a repository: snapshots and run records, with sizes. */

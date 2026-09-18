@@ -4,9 +4,6 @@ import type { SystemOne } from "@triage/triage";
 process.env.ZERO_UPSTREAM_DB ??= "postgres://unused";
 process.env.AUTH_SECRET ??= "test";
 const { generateStaged } = await import("../src/review/stages.ts");
-const { Tracer } = await import("@triage/triage/trace");
-const tracer = Tracer.off();
-const root = tracer.start("test", "CHAIN", null);
 type AgentStage = import("../src/review/stages.ts").AgentStage;
 const snapshot = { owner: "o", repo: "r", sha: "abc" };
 
@@ -117,8 +114,6 @@ describe("staged generation", () => {
       agent: () => fakeAgent(complete),
       classify: async () => [],
       ask,
-      tracer,
-      root,
       onPhase: async (phase, groups) => {
         phases.push(`${phase}${groups ? `:${groups.length}` : ""}`);
       },
@@ -174,8 +169,6 @@ describe("staged generation", () => {
       agent: () => fakeAgent(complete),
       classify: async () => [],
       ask,
-      tracer,
-      root,
       onPhase: async () => {},
     });
     expect(out.reusedSteps).toBe(1);

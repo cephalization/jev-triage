@@ -111,15 +111,16 @@ deliberately small (100 issues) so trying a large repository costs cents, not do
 
 ## Layout
 
-| Path              | What                                                                           |
-| ----------------- | ------------------------------------------------------------------------------ |
-| `apps/web`        | React dashboard (Vite+, shadcn/ui, Zero client)                                |
-| `apps/api`        | Hono server: Zero query and mutate endpoints, GitHub sync, classifier worker   |
-| `apps/reviewer`   | Guided-review environment: a celld cell running the pi SDK against a provider  |
-| `packages/schema` | Zero schema, client-safe mutators, synced queries, effective-value helper      |
-| `packages/triage` | TypeSafe question builders, the pure `decide()` policy, priority, calibration  |
-| `db/migrations`   | Plain SQL, applied in order by `vp run migrate` (and on every `vp run dev`)    |
-| `docs`            | `ARCHITECTURE.md`: data model, flows, question design, and the rules behind it |
+| Path                             | What                                                                                      |
+| -------------------------------- | ----------------------------------------------------------------------------------------- |
+| `apps/web`                       | React dashboard (Vite+, shadcn/ui, Zero client)                                           |
+| `apps/api`                       | Hono server: Zero query and mutate endpoints, GitHub sync, classifier worker              |
+| `apps/reviewer`                  | Guided-review environment: a celld cell running the pi SDK against a provider             |
+| `packages/openinference-workers` | OpenInference tracing for Workers and Durable Objects on the standard OpenTelemetry stack |
+| `packages/schema`                | Zero schema, client-safe mutators, synced queries, effective-value helper                 |
+| `packages/triage`                | TypeSafe question builders, the pure `decide()` policy, priority, calibration             |
+| `db/migrations`                  | Plain SQL, applied in order by `vp run migrate` (and on every `vp run dev`)               |
+| `docs`                           | `ARCHITECTURE.md`: data model, flows, question design, and the rules behind it            |
 
 ## Development
 

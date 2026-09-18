@@ -1,7 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { baseFor, completeWithPi, modelFor } from "../src/pi.ts";
-import { Tracer } from "@triage/triage/trace";
 import { runNarrative } from "../src/review.ts";
 
 const GROUPS = '{"summary":"Adds the widget.","impact":"","findings":[]}';
@@ -160,7 +159,8 @@ describe("pi runner", () => {
           classification: null,
         },
       },
-      { snapshot, callback: null, repo: "o/r", tracer: Tracer.off() },
+      { snapshot, callback: null, repo: "o/r", tracer: null },
+      { request: new Request("http://cell/runs/r/narrative"), tracing: null, execution: null },
     );
     expect(out.result.summary).toBe("Adds the widget.");
     expect(out.result.findings).toEqual([]);

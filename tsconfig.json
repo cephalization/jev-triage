@@ -8,6 +8,9 @@
       "path": "./packages/triage"
     },
     {
+      "path": "./packages/openinference-workers"
+    },
+    {
       "path": "./apps/api"
     },
     {

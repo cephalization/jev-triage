@@ -24,9 +24,14 @@ import {
   type StepAssignment,
   type StepSkeleton,
 } from "@triage/triage/review";
-import { OI, type Attrs, type Span, type Tracer } from "@triage/triage/trace";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions as S,
+} from "@arizeai/openinference-semantic-conventions";
+import { SpanStatusCode, type Attributes } from "@opentelemetry/api";
 import { cellHeaders, type Cell, type Snapshot } from "./cell.ts";
-import { askSystemOne, type JevTrace } from "./jev.ts";
+import { askSystemOne } from "./jev.ts";
+import { traceHeaders, traceTarget, tracer } from "./otel.ts";
 import { addUsage, NO_USAGE, type CallUsage } from "./usage.ts";
 
 /**
@@ -41,10 +46,10 @@ import { addUsage, NO_USAGE, type CallUsage } from "./usage.ts";
 
 export type Phase = "snapshot" | "classify" | "skeleton" | "assign" | "narrate";
 
-/** The agent stages: structured request in, validated answer and usage out, under a span. */
+/** The agent stages: structured request in, validated answer and usage out. */
 export interface AgentStage {
-  skeleton(req: SkeletonRequest, parent: Span): Promise<AgentAnswer<{ steps: StepSkeleton[] }>>;
-  narrative(req: NarrativeRequest, parent: Span): Promise<AgentAnswer<Narrative>>;
+  skeleton(req: SkeletonRequest): Promise<AgentAnswer<{ steps: StepSkeleton[] }>>;
+  narrative(req: NarrativeRequest): Promise<AgentAnswer<Narrative>>;
 }
 
 export interface AgentAnswer<T> extends CallUsage {
@@ -68,17 +73,10 @@ export interface StageInput {
   systemOne: SystemOne;
   loadSnapshot: () => Promise<Snapshot>;
   agent: (snapshot: Snapshot) => AgentStage;
-  classify: (
-    intent: ReviewIntent,
-    files: readonly PatchFile[],
-    trace: JevTrace,
-  ) => Promise<ClassifiedFile[]>;
+  classify: (intent: ReviewIntent, files: readonly PatchFile[]) => Promise<ClassifiedFile[]>;
   onPhase: (phase: Phase, groups: ReviewGroup[] | null) => Promise<void>;
   /** The accounted System One call; tests pass one that skips the database. */
   ask?: typeof askSystemOne;
-  tracer: Tracer;
-  /** The review's root span; every stage hangs from it. */
-  root: Span;
 }
 
 export interface StagedOutput extends CallUsage {
@@ -108,23 +106,40 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
     return a.result;
   };
 
-  const tracer = input.tracer;
-  const stage = <T>(name: string, fn: (span: Span) => Promise<T>, output?: (r: T) => Attrs) =>
-    tracer.span(name, "CHAIN", input.root, {}, fn, output);
-  const jev = (parent: Span): JevTrace => ({ tracer, parent });
+  // Each stage is a chain span under whatever is active (the review's root); jev calls and the
+  // cell's spans nest beneath it through the async context and the traceparent header.
+  const stage = <T>(name: string, fn: () => Promise<T>, output?: (r: T) => Attributes) =>
+    tracer.startActiveSpan(
+      name,
+      { attributes: { [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.CHAIN } },
+      async (span) => {
+        try {
+          const result = await fn();
+          if (output) span.setAttributes(output(result));
+          span.setStatus({ code: SpanStatusCode.OK });
+          return result;
+        } catch (e) {
+          span.recordException(e instanceof Error ? e : new Error(String(e)));
+          span.setStatus({ code: SpanStatusCode.ERROR, message: message(e) });
+          throw e;
+        } finally {
+          span.end();
+        }
+      },
+    );
 
   // 1. Snapshot and classification side by side; either failing fails the review.
   await input.onPhase("snapshot", null);
   const snapshotP = stage(
     "snapshot",
     () => input.loadSnapshot(),
-    (s) => ({ [OI.outputValue]: s.sha }),
+    (snap) => ({ [S.OUTPUT_VALUE]: snap.sha }),
   );
   snapshotP.catch(() => {});
   const classifiedP = stage(
     "classify",
-    (span) => input.classify(input.intent, files, jev(span)),
-    (c) => ({ [OI.outputValue]: renderClassification(c) }),
+    () => input.classify(input.intent, files),
+    (c) => ({ [S.OUTPUT_VALUE]: renderClassification(c) }),
   );
   await input.onPhase("classify", null);
   const classified = await classifiedP;
@@ -137,10 +152,8 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
   const reused = input.previous
     ? await stage(
         "compare",
-        (span) => keepUnchanged(input, files, input.previous!, jev(span)),
-        (r) => ({
-          [OI.outputValue]: r.map((g) => g.name).join(", ") || "(nothing kept)",
-        }),
+        () => keepUnchanged(input, files, input.previous!),
+        (r) => ({ [S.OUTPUT_VALUE]: r.map((g) => g.name).join(", ") || "(nothing kept)" }),
       )
     : [];
   const reusedPaths = new Set(reused.flatMap((g) => g.files));
@@ -151,18 +164,15 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
   const agent = input.agent(snapshot);
   const skeleton = count(
     "skeleton",
-    await stage("skeleton", (span) =>
-      agent.skeleton(
-        {
-          intent: input.intent,
-          files,
-          classification,
-          reusedSteps: reused,
-          skimPaths,
-          tools: true,
-        },
-        span,
-      ),
+    await stage("skeleton", () =>
+      agent.skeleton({
+        intent: input.intent,
+        files,
+        classification,
+        reusedSteps: reused,
+        skimPaths,
+        tools: true,
+      }),
     ),
   );
   const steps = withReusedSteps(skeleton.steps, reused);
@@ -170,7 +180,7 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
   // 4. jev places every file that is not already in a kept step.
   await input.onPhase("assign", null);
   const toAssign = files.filter((x) => !reusedPaths.has(x.path));
-  const assignments = await stage("assign", (span) => assignAll(input, steps, toAssign, jev(span)));
+  const assignments = await stage("assign", () => assignAll(input, steps, toAssign));
   let groups: ReviewGroup[] = groupsFromAssignments(steps, toAssign, assignments, classified);
   const keptNames = new Set<string>();
   for (const g of reused) {
@@ -193,7 +203,7 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
   const allSteps = groups.map(
     (x) => steps.find((s) => s.name === x.name) ?? { name: x.name, intent: x.summary },
   );
-  await stage("narrate", (narrateSpan) =>
+  await stage("narrate", () =>
     parallel(
       groups.filter((g) => !keptNames.has(g.name)),
       NARRATIVE_CONCURRENCY,
@@ -201,19 +211,16 @@ export async function generateStaged(input: StageInput): Promise<StagedOutput> {
         const index = groups.indexOf(g);
         const out = count(
           "narrative",
-          await agent.narrative(
-            {
-              intent: input.intent,
-              step: allSteps[index]!,
-              index,
-              allSteps,
-              files: g.files.map((p) => byPath.get(p)).filter((x): x is PatchFile => !!x),
-              classification:
-                lines.filter((l) => g.files.some((p) => l.includes(` ${p}:`))).join("\n") || null,
-              tools: true,
-            },
-            narrateSpan,
-          ),
+          await agent.narrative({
+            intent: input.intent,
+            step: allSteps[index]!,
+            index,
+            allSteps,
+            files: g.files.map((p) => byPath.get(p)).filter((x): x is PatchFile => !!x),
+            classification:
+              lines.filter((l) => g.files.some((p) => l.includes(` ${p}:`))).join("\n") || null,
+            tools: true,
+          }),
         );
         g.summary = out.summary;
         g.impact = out.impact || undefined;
@@ -243,24 +250,22 @@ export function cellAgent(
   model: string,
   callbackUrl: string,
   snapshot: Snapshot,
-  tracer: Tracer,
   fetchImpl: typeof fetch = fetch,
 ): AgentStage {
   const post = async <T>(
     stage: "skeleton" | "narrative",
     request: unknown,
-    parent: Span,
   ): Promise<AgentAnswer<T>> => {
     const res = await fetchImpl(`${cell.url}/runs/${encodeURIComponent(reviewId)}/${stage}`, {
       method: "POST",
-      headers: cellHeaders(cell),
+      headers: traceHeaders(cellHeaders(cell)),
       body: JSON.stringify({
         provider: { kind: provider.kind, baseUrl: provider.baseUrl, apiKey: provider.key },
         model,
         callback: { url: callbackUrl, token: cell.token },
         repo: repoId,
         snapshot,
-        trace: tracer.enabled ? parent.context(tracer.endpoint!, tracer.project) : null,
+        trace: traceTarget,
         request,
       }),
       signal: AbortSignal.timeout(10 * 60_000),
@@ -282,31 +287,23 @@ export function cellAgent(
     };
   };
   return {
-    skeleton: (req, parent) =>
-      post(
-        "skeleton",
-        {
-          intent: req.intent,
-          patch: req.files.map((f) => f.text).join(""),
-          classification: req.classification,
-          reusedSteps: req.reusedSteps,
-          skimPaths: [...req.skimPaths],
-        },
-        parent,
-      ),
-    narrative: (req, parent) =>
-      post(
-        "narrative",
-        {
-          intent: req.intent,
-          step: req.step,
-          index: req.index,
-          allSteps: req.allSteps,
-          patch: req.files.map((f) => f.text).join(""),
-          classification: req.classification,
-        },
-        parent,
-      ),
+    skeleton: (req) =>
+      post("skeleton", {
+        intent: req.intent,
+        patch: req.files.map((f) => f.text).join(""),
+        classification: req.classification,
+        reusedSteps: req.reusedSteps,
+        skimPaths: [...req.skimPaths],
+      }),
+    narrative: (req) =>
+      post("narrative", {
+        intent: req.intent,
+        step: req.step,
+        index: req.index,
+        allSteps: req.allSteps,
+        patch: req.files.map((f) => f.text).join(""),
+        classification: req.classification,
+      }),
   };
 }
 
@@ -315,23 +312,18 @@ async function keepUnchanged(
   input: StageInput,
   files: readonly PatchFile[],
   previous: { groups: ReviewGroup[]; patch: string },
-  trace: JevTrace,
 ): Promise<ReviewGroup[]> {
   const before = splitPatch(previous.patch);
   const changed = changedFiles(before, files);
   const material = new Set<string>();
   if (changed.length > 0) {
-    const result = await (input.ask ?? askSystemOne)(
-      input.systemOne,
-      {
-        repoId: input.repoId,
-        kind: "review_changes",
-        state: buildChangeState(changed),
-        questions: buildChangeQuestions(changed.length),
-        items: changed.length,
-      },
-      trace,
-    );
+    const result = await (input.ask ?? askSystemOne)(input.systemOne, {
+      repoId: input.repoId,
+      kind: "review_changes",
+      state: buildChangeState(changed),
+      questions: buildChangeQuestions(changed.length),
+      items: changed.length,
+    });
     const probs = foldChanges(result.answers as Parameters<typeof foldChanges>[0], changed.length);
     changed.forEach((c, i) => {
       if ((probs[i] ?? 1) >= MATERIAL) material.add(c.path);
@@ -360,24 +352,19 @@ async function assignAll(
   input: StageInput,
   steps: readonly StepSkeleton[],
   files: readonly PatchFile[],
-  trace: JevTrace,
 ): Promise<StepAssignment[]> {
   const batches: PatchFile[][] = [];
   for (let i = 0; i < files.length; i += FILES_PER_ASSIGN_REQUEST)
     batches.push(files.slice(i, i + FILES_PER_ASSIGN_REQUEST));
   const results = await Promise.all(
     batches.map(async (batch) => {
-      const result = await (input.ask ?? askSystemOne)(
-        input.systemOne,
-        {
-          repoId: input.repoId,
-          kind: "review_assign",
-          state: buildAssignState(input.intent, steps, batch),
-          questions: buildAssignQuestions(batch.length, steps),
-          items: batch.length,
-        },
-        trace,
-      );
+      const result = await (input.ask ?? askSystemOne)(input.systemOne, {
+        repoId: input.repoId,
+        kind: "review_assign",
+        state: buildAssignState(input.intent, steps, batch),
+        questions: buildAssignQuestions(batch.length, steps),
+        items: batch.length,
+      });
       return foldAssignments(result.answers as Parameters<typeof foldAssignments>[0], batch.length);
     }),
   );
@@ -395,3 +382,5 @@ async function parallel<T>(items: T[], limit: number, fn: (item: T) => Promise<v
   });
   await Promise.all(workers);
 }
+
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e));

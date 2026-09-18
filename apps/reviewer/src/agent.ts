@@ -1,5 +1,10 @@
 import { Type, type Message, type Tool } from "@earendil-works/pi-ai";
-import { clip, messageAttrs, OI, toolAttrs, type Span, type Tracer } from "@triage/triage/trace";
+import { injectTraceHeaders } from "@triage/openinference-workers";
+import {
+  OpenInferenceSpanKind,
+  SemanticConventions as S,
+} from "@arizeai/openinference-semantic-conventions";
+import { SpanStatusCode, trace, type Attributes, type Tracer } from "@opentelemetry/api";
 import {
   addUsage,
   modelFor,
@@ -15,7 +20,7 @@ import {
  * The agent loop: one prompt, a small set of repository tools, and jev behind `rank_files`
  * so the agent asks which of many candidates matter instead of reading them all. Tool calls
  * are executed here, appended to the context, and the model is asked again. Every model turn
- * and every tool call is a span in Phoenix.
+ * is an LLM span and every tool call a TOOL span, nested under whatever span is active.
  */
 
 export interface Callback {
@@ -36,13 +41,16 @@ export interface SnapshotClient {
 }
 
 export function snapshotClient(
-  stub: { fetch: (input: string) => Promise<Response> },
+  stub: { fetch: (input: string, init?: RequestInit) => Promise<Response> },
   base: string,
 ): SnapshotClient {
   const get = async <T>(tail: string, params: Record<string, string | number | null>) => {
     const q = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) if (v !== null && v !== "") q.set(k, String(v));
-    const res = await stub.fetch(`http://snapshot${base}/${tail}?${q.toString()}`);
+    // The snapshot cell is another isolate; the trace follows through the headers.
+    const res = await stub.fetch(`http://snapshot${base}/${tail}?${q.toString()}`, {
+      headers: injectTraceHeaders(),
+    });
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`snapshot ${tail} answered ${res.status}`);
     return (await res.json()) as T;
@@ -119,14 +127,21 @@ export interface ToolHost {
   callback: Callback | null;
   /** `owner/repo`, so jev's work is accounted to the repository. */
   repo: string;
-  tracer: Tracer;
+  /** Null traces into nothing. */
+  tracer: Tracer | null;
+}
+
+const noopTracer = trace.getTracer("noop");
+
+/** Bounded attribute payloads; Phoenix stores them, but a 5 MB prompt helps nobody. */
+function clip(text: string, max = 200_000): string {
+  return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more chars)` : text;
 }
 
 export async function runTool(
   host: ToolHost,
   name: string,
   args: Record<string, unknown>,
-  parent: Span | null,
 ): Promise<{ text: string; isError: boolean }> {
   const snap = host.snapshot;
   const str = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : "");
@@ -179,16 +194,11 @@ export async function runTool(
           : [];
         const res = await fetch(`${host.callback.url.replace(/\/+$/, "")}/api/internal/rerank`, {
           method: "POST",
-          headers: {
+          headers: injectTraceHeaders({
             "content-type": "application/json",
             ...(host.callback.token ? { "x-reviewer-token": host.callback.token } : {}),
-          },
-          body: JSON.stringify({
-            repo: host.repo,
-            question: str("question"),
-            candidates,
-            trace: parent ? parent.context(host.tracer.endpoint ?? "", host.tracer.project) : null,
           }),
+          body: JSON.stringify({ repo: host.repo, question: str("question"), candidates }),
         });
         const data = (await res.json().catch(() => ({}))) as {
           ranked?: { path: string; relevance: number }[];
@@ -206,18 +216,35 @@ export async function runTool(
         return { text: `unknown tool ${name}`, isError: true };
     }
   };
-  const span = host.tracer.start(name, "TOOL", parent, {
-    [OI.toolName]: name,
-    [OI.inputValue]: JSON.stringify(args),
-    [OI.inputMime]: "application/json",
-  });
-  const result = await run();
-  host.tracer.end(
-    span,
-    { [OI.outputValue]: clip(result.text, 40_000), [OI.outputMime]: "text/plain" },
-    result.isError ? result.text.slice(0, 200) : null,
+  const tracer = host.tracer ?? noopTracer;
+  return tracer.startActiveSpan(
+    name,
+    {
+      attributes: {
+        [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.TOOL,
+        [S.TOOL_NAME]: name,
+        [S.INPUT_VALUE]: JSON.stringify(args),
+        [S.INPUT_MIME_TYPE]: "application/json",
+      },
+    },
+    async (span) => {
+      try {
+        const result = await run();
+        span.setAttributes({
+          [S.OUTPUT_VALUE]: clip(result.text, 40_000),
+          [S.OUTPUT_MIME_TYPE]: "text/plain",
+        });
+        span.setStatus(
+          result.isError
+            ? { code: SpanStatusCode.ERROR, message: result.text.slice(0, 200) }
+            : { code: SpanStatusCode.OK },
+        );
+        return result;
+      } finally {
+        span.end();
+      }
+    },
   );
-  return result;
 }
 
 /** Ask with tools until the model answers in text. */
@@ -226,77 +253,55 @@ export async function runAgent(
   modelId: string,
   prompt: string,
   host: ToolHost,
-  parent: Span | null,
 ): Promise<AgentRun> {
   const m = models();
   const { model, priced } = modelFor(spec, modelId);
   const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
   const tools = toolDefinitions();
+  const tracer = host.tracer ?? noopTracer;
   let usage: CallUsage = NO_USAGE;
   let toolCalls = 0;
   for (let turn = 0; turn < MAX_TURNS; turn += 1) {
-    const span = host.tracer.start(`${spec.kind}.completion`, "LLM", parent, {
-      [OI.modelName]: modelId,
-      [OI.system]: spec.kind === "openai-compatible" ? "openai" : spec.kind,
-      [OI.provider]: new URL(spec.baseUrl).host,
-      [OI.invocationParameters]: JSON.stringify({ max_tokens: model.maxTokens, turn }),
-      ...messageAttrs("llm.input_messages", messages.map(asPlainMessage)),
-      ...toolAttrs(tools),
-    });
-    let r: Awaited<ReturnType<typeof m.completeSimple>>;
-    try {
-      r = await m.completeSimple(
-        model,
-        { messages, tools },
-        { apiKey: spec.apiKey, maxTokens: model.maxTokens },
-      );
-    } catch (e) {
-      host.tracer.end(span, {}, e);
-      throw e;
-    }
-    const turnUsage = usageOf(r.usage, priced);
-    usage = addUsage(usage, turnUsage);
+    const r = await tracer.startActiveSpan(
+      `${spec.kind}.completion`,
+      { attributes: llmRequestAttributes(spec, modelId, model.maxTokens, turn, messages, tools) },
+      async (span) => {
+        try {
+          const out = await m.completeSimple(
+            model,
+            { messages, tools },
+            { apiKey: spec.apiKey, maxTokens: model.maxTokens },
+          );
+          span.setAttributes(llmResponseAttributes(out, priced));
+          if (out.stopReason === "error" || out.stopReason === "aborted")
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message: out.errorMessage ?? out.stopReason,
+            });
+          else span.setStatus({ code: SpanStatusCode.OK });
+          return out;
+        } catch (e) {
+          span.recordException(e instanceof Error ? e : new Error(String(e)));
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          throw e;
+        } finally {
+          span.end();
+        }
+      },
+    );
+    usage = addUsage(usage, usageOf(r.usage, priced));
+    if (r.stopReason === "error" || r.stopReason === "aborted")
+      throw new Error(`${spec.kind} ${modelId}: ${r.errorMessage ?? r.stopReason}`);
     const calls = r.content.filter((c) => c.type === "toolCall");
     const text = r.content
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
       .map((c) => c.text)
       .join("");
-    host.tracer.end(
-      span,
-      {
-        ...messageAttrs("llm.output_messages", [
-          {
-            role: "assistant",
-            content: text,
-            toolCalls: calls.map((c) => ({ id: c.id, name: c.name, arguments: c.arguments })),
-          },
-        ]),
-        [OI.promptTokens]: turnUsage.inputTokens,
-        [OI.completionTokens]: turnUsage.outputTokens,
-        [OI.totalTokens]: turnUsage.inputTokens + turnUsage.outputTokens,
-        [OI.cacheReadTokens]: turnUsage.cacheReadTokens,
-        [OI.cacheWriteTokens]: turnUsage.cacheWriteTokens,
-        ...(priced
-          ? {
-              [OI.costPrompt]:
-                r.usage.cost.input + r.usage.cost.cacheRead + r.usage.cost.cacheWrite,
-              [OI.costCompletion]: r.usage.cost.output,
-              [OI.costTotal]: r.usage.cost.total,
-            }
-          : {}),
-        "llm.stop_reason": r.stopReason,
-      },
-      r.stopReason === "error" || r.stopReason === "aborted"
-        ? (r.errorMessage ?? r.stopReason)
-        : null,
-    );
-    if (r.stopReason === "error" || r.stopReason === "aborted")
-      throw new Error(`${spec.kind} ${modelId}: ${r.errorMessage ?? r.stopReason}`);
     if (calls.length === 0 || r.stopReason !== "toolUse") return { text, ...usage, toolCalls };
     messages.push(r);
     for (const call of calls) {
       toolCalls += 1;
-      const result = await runTool(host, call.name, call.arguments, parent);
+      const result = await runTool(host, call.name, call.arguments);
       messages.push({
         role: "toolResult",
         toolCallId: call.id,
@@ -310,45 +315,91 @@ export async function runAgent(
   throw new Error(`the agent used ${MAX_TURNS} tool turns without answering`);
 }
 
-/** pi's message shapes flattened for the trace. */
-function asPlainMessage(m: Message): {
-  role: string;
-  content: string;
-  toolCalls?: { id: string; name: string; arguments: unknown }[];
-} {
-  if (m.role === "user")
-    return {
-      role: "user",
-      content: clip(
+type PiResponse = Awaited<ReturnType<ReturnType<typeof models>["completeSimple"]>>;
+
+function llmRequestAttributes(
+  spec: ProviderSpec,
+  modelId: string,
+  maxTokens: number,
+  turn: number,
+  messages: readonly Message[],
+  tools: readonly Tool[],
+): Attributes {
+  const out: Attributes = {
+    [S.OPENINFERENCE_SPAN_KIND]: OpenInferenceSpanKind.LLM,
+    [S.LLM_MODEL_NAME]: modelId,
+    [S.LLM_SYSTEM]: spec.kind === "openai-compatible" ? "openai" : spec.kind,
+    [S.LLM_PROVIDER]: new URL(spec.baseUrl).host,
+    [S.LLM_INVOCATION_PARAMETERS]: JSON.stringify({ max_tokens: maxTokens, turn }),
+  };
+  messages.forEach((m, i) => {
+    const p = `${S.LLM_INPUT_MESSAGES}.${i}.`;
+    if (m.role === "user") {
+      out[`${p}${S.MESSAGE_ROLE}`] = "user";
+      out[`${p}${S.MESSAGE_CONTENT}`] = clip(
         typeof m.content === "string"
           ? m.content
           : m.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join(""),
-      ),
-    };
-  if (m.role === "toolResult")
-    return {
-      role: "tool",
-      content: clip(m.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("")),
-    };
-  return {
-    role: "assistant",
-    content: clip(
+      );
+    } else if (m.role === "toolResult") {
+      out[`${p}${S.MESSAGE_ROLE}`] = "tool";
+      out[`${p}${S.MESSAGE_CONTENT}`] = clip(
+        m.content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join(""),
+      );
+      out[`${p}${S.MESSAGE_TOOL_CALL_ID}`] = m.toolCallId;
+    } else {
+      out[`${p}${S.MESSAGE_ROLE}`] = "assistant";
+      out[`${p}${S.MESSAGE_CONTENT}`] = clip(
+        m.content
+          .filter((c): c is { type: "text"; text: string } => c.type === "text")
+          .map((c) => c.text)
+          .join(""),
+      );
       m.content
-        .filter((c): c is { type: "text"; text: string } => c.type === "text")
-        .map((c) => c.text)
-        .join(""),
-    ),
-    toolCalls: m.content
-      .filter(
-        (
-          c,
-        ): c is {
-          type: "toolCall";
-          id: string;
-          name: string;
-          arguments: Record<string, unknown>;
-        } => c.type === "toolCall",
-      )
-      .map((c) => ({ id: c.id, name: c.name, arguments: c.arguments })),
+        .filter((c) => c.type === "toolCall")
+        .forEach((c, j) => {
+          const t = `${p}${S.MESSAGE_TOOL_CALLS}.${j}.`;
+          out[`${t}${S.TOOL_CALL_ID}`] = c.id;
+          out[`${t}${S.TOOL_CALL_FUNCTION_NAME}`] = c.name;
+          out[`${t}${S.TOOL_CALL_FUNCTION_ARGUMENTS_JSON}`] = JSON.stringify(c.arguments);
+        });
+    }
+  });
+  tools.forEach((t, i) => {
+    out[`${S.LLM_TOOLS}.${i}.${S.TOOL_NAME}`] = t.name;
+    out[`${S.LLM_TOOLS}.${i}.${S.TOOL_DESCRIPTION}`] = t.description;
+    out[`${S.LLM_TOOLS}.${i}.${S.TOOL_JSON_SCHEMA}`] = JSON.stringify(t.parameters);
+  });
+  return out;
+}
+
+function llmResponseAttributes(r: PiResponse, priced: boolean): Attributes {
+  const text = r.content
+    .filter((c): c is { type: "text"; text: string } => c.type === "text")
+    .map((c) => c.text)
+    .join("");
+  const out: Attributes = {
+    [`${S.LLM_OUTPUT_MESSAGES}.0.${S.MESSAGE_ROLE}`]: "assistant",
+    [`${S.LLM_OUTPUT_MESSAGES}.0.${S.MESSAGE_CONTENT}`]: clip(text),
+    [S.LLM_TOKEN_COUNT_PROMPT]: r.usage.input,
+    [S.LLM_TOKEN_COUNT_COMPLETION]: r.usage.output,
+    [S.LLM_TOKEN_COUNT_TOTAL]: r.usage.input + r.usage.output,
+    [S.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_READ]: r.usage.cacheRead,
+    [S.LLM_TOKEN_COUNT_PROMPT_DETAILS_CACHE_WRITE]: r.usage.cacheWrite,
+    "llm.stop_reason": r.stopReason,
   };
+  r.content
+    .filter((c) => c.type === "toolCall")
+    .forEach((c, j) => {
+      const t = `${S.LLM_OUTPUT_MESSAGES}.0.${S.MESSAGE_TOOL_CALLS}.${j}.`;
+      out[`${t}${S.TOOL_CALL_ID}`] = c.id;
+      out[`${t}${S.TOOL_CALL_FUNCTION_NAME}`] = c.name;
+      out[`${t}${S.TOOL_CALL_FUNCTION_ARGUMENTS_JSON}`] = JSON.stringify(c.arguments);
+    });
+  if (priced) {
+    out[S.LLM_COST_PROMPT] = r.usage.cost.input + r.usage.cost.cacheRead + r.usage.cost.cacheWrite;
+    out[S.LLM_COST_COMPLETION] = r.usage.cost.output;
+    out[S.LLM_COST_TOTAL] = r.usage.cost.total;
+  }
+  return out;
 }
