@@ -3,7 +3,7 @@ import type { SystemOne } from "@triage/triage";
 
 process.env.ZERO_UPSTREAM_DB ??= "postgres://unused";
 process.env.AUTH_SECRET ??= "test";
-const { generateStaged } = await import("../src/review/stages.ts");
+const { cellAgent, generateStaged } = await import("../src/review/stages.ts");
 type AgentStage = import("../src/review/stages.ts").AgentStage;
 const snapshot = { owner: "o", repo: "r", sha: "abc" };
 
@@ -178,5 +178,78 @@ describe("staged generation", () => {
       files: ["src/core.ts", "src/core.test.ts"],
     });
     expect(written).toEqual(["Supporting changes"]);
+  });
+});
+
+describe("cellAgent", () => {
+  test("asks the cell again while a stage is running, then takes the result", async () => {
+    const bodies: string[] = [];
+    const replies = [
+      { status: "running", turns: 3, toolCalls: 2 },
+      { status: "running", turns: 6, toolCalls: 5 },
+      {
+        status: "done",
+        result: { steps: [{ name: "a", intent: "b" }] },
+        inputTokens: 7,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 0.01,
+        priced: true,
+        toolCalls: 6,
+      },
+    ];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      bodies.push(typeof init?.body === "string" ? init.body : "?");
+      return Response.json(replies.shift());
+    }) as unknown as typeof fetch;
+    const agent = cellAgent(
+      { url: "http://cell", token: null },
+      "rev",
+      "o/r",
+      { kind: "openai-compatible", baseUrl: "http://p", key: "k" },
+      "m",
+      "http://api",
+      snapshot,
+      fetchImpl,
+    );
+    const out = await agent.skeleton({
+      intent: { title: "t", body: "", author: "a", headRef: "h", baseRef: "b" },
+      files: [],
+      classification: null,
+      reusedSteps: [],
+      skimPaths: new Set(),
+      tools: true,
+    });
+    expect(out.result.steps[0]!.name).toBe("a");
+    expect(out.toolCalls).toBe(6);
+    expect(bodies).toHaveLength(3);
+    expect(new Set(bodies).size).toBe(1);
+  });
+
+  test("a cell error is the stage's error", async () => {
+    const fetchImpl = (async () =>
+      Response.json({ error: "boom" }, { status: 502 })) as unknown as typeof fetch;
+    const agent = cellAgent(
+      { url: "http://cell", token: null },
+      "rev",
+      "o/r",
+      { kind: "openai-compatible", baseUrl: "http://p", key: "k" },
+      "m",
+      "http://api",
+      snapshot,
+      fetchImpl,
+    );
+    await expect(
+      agent.narrative({
+        intent: { title: "t", body: "", author: "a", headRef: "h", baseRef: "b" },
+        step: { name: "s", intent: "i" },
+        index: 0,
+        allSteps: [{ name: "s", intent: "i" }],
+        files: [],
+        classification: null,
+        tools: true,
+      }),
+    ).rejects.toThrow("reviewer cell: boom");
   });
 });

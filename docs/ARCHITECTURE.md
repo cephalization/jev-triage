@@ -129,8 +129,11 @@ snapshot of the repository at the head while jev answers four questions per chan
 (`packages/triage/src/review/files.ts`, stored in `guided_review_file`, one `run` row per
 batch). The agent names the steps in one short call; jev assigns every file to a step in one
 request; the agent writes each step's text in parallel, reading the snapshot through
-`list_files`, `read_file`, `grep` and a jev-backed `rank_files`. Steps unchanged since the
-previous review are kept. Every stage streams through the row's `phase` and `groups_json`. There
+`list_files`, `read_file`, `grep` and a jev-backed `rank_files`. A tool that fails answers the
+model with its error, so the model can change course. Each cell request works for about a
+minute of turns and then hands back with the conversation stored in the cell's SQLite; the API
+asks again until the stage answers, so no request outlives celld's handler budget. Steps
+unchanged since the previous review are kept. Every stage streams through the row's `phase` and `groups_json`. There
 is no degraded path: a review needs jev and the reviewer cell, generation is refused up front
 when either is missing, and any stage failing fails the review with its reason. The screen at
 `/pulls/$pullId/review` reads the row, its file rows and everyone's `review_progress` marks

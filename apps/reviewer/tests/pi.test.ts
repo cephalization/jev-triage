@@ -2,6 +2,17 @@ import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { baseFor, completeWithPi, modelFor } from "../src/pi.ts";
 import { runNarrative } from "../src/review.ts";
+import type { AgentStore } from "../src/state.ts";
+
+/** The store a cell keeps in SQLite, in a map: enough to run a stage in one part here. */
+function memoryStore(): AgentStore {
+  const map = new Map<string, Parameters<AgentStore["save"]>[1]>();
+  return {
+    load: (key) => map.get(key) ?? null,
+    save: (key, state) => void map.set(key, state),
+    clear: (key) => void map.delete(key),
+  };
+}
 
 const GROUPS = '{"summary":"Adds the widget.","impact":"","findings":[]}';
 
@@ -160,8 +171,16 @@ describe("pi runner", () => {
         },
       },
       { snapshot, callback: null, repo: "o/r", tracer: null },
-      { request: new Request("http://cell/runs/r/narrative"), tracing: null, execution: null },
+      {
+        request: new Request("http://cell/runs/r/narrative"),
+        tracing: null,
+        execution: null,
+        store: memoryStore(),
+        startedAt: Date.now(),
+      },
     );
+    expect(out.status).toBe("done");
+    if (out.status !== "done") throw new Error("unreachable");
     expect(out.result.summary).toBe("Adds the widget.");
     expect(out.result.findings).toEqual([]);
     expect(out.inputTokens).toBe(20);

@@ -3,6 +3,7 @@ import { runNarrative, runSkeleton, type NarrativeBody, type SkeletonBody } from
 import { snapshotClient, type SnapshotClient } from "./agent.ts";
 import { tracingFor } from "./otel.ts";
 import { RepoSnapshot, type SnapshotStats } from "./snapshot.ts";
+import { sqlAgentStore } from "./state.ts";
 
 export { RepoSnapshot };
 
@@ -11,6 +12,8 @@ export { RepoSnapshot };
  *   POST /snapshots/{owner}/{repo}/{sha}   load the repository at that commit (once per head)
  *   POST /runs/{id}/skeleton               name the steps, with repository tools
  *   POST /runs/{id}/narrative              write one step, with repository tools (in parallel)
+ * A stage answers {status:"running"} when it pauses inside the request's time budget; the API
+ * posts the same body again and the cell resumes the stored conversation.
  *   GET  /repos/{owner}/{repo}/stats       what this repository's cells hold, for the settings page
  * One ReviewRun cell per review, one RepoSnapshot per commit, one RepoIndex per repository.
  */
@@ -97,7 +100,13 @@ export class ReviewRun extends DurableObject<Env> {
         repo: body.repo,
         tracer: tracing?.otelTracer ?? null,
       };
-      const env = { request, tracing, execution: this.ctx };
+      const env = {
+        request,
+        tracing,
+        execution: this.ctx,
+        store: sqlAgentStore(this.ctx.storage.sql),
+        startedAt: Date.now(),
+      };
       const out =
         stage === "skeleton"
           ? await runSkeleton(body as SkeletonBody, host, env)

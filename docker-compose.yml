@@ -38,6 +38,12 @@ services:
       - reviewer_state:/app/.celld
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      # celld bounds a request handler (default 300 s) and one outbound fetch (default 120 s).
+      # The reviewer hands back to the API after a minute of turns, so only a single long
+      # provider response can reach either bound; give that room.
+      CELLD_HANDLER_BUDGET_S: "1800"
+      CELLD_FETCH_TIMEOUT_S: "1800"
 
   # Arize Phoenix: traces of every guided review (jev calls, agent turns, tool calls, cost).
   # UI and OTLP/HTTP on 7006, OTLP/gRPC on 7004; SQLite under the phoenix_data volume.

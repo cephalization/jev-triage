@@ -256,35 +256,42 @@ export function cellAgent(
     stage: "skeleton" | "narrative",
     request: unknown,
   ): Promise<AgentAnswer<T>> => {
-    const res = await fetchImpl(`${cell.url}/runs/${encodeURIComponent(reviewId)}/${stage}`, {
-      method: "POST",
-      headers: traceHeaders(cellHeaders(cell)),
-      body: JSON.stringify({
-        provider: { kind: provider.kind, baseUrl: provider.baseUrl, apiKey: provider.key },
-        model,
-        callback: { url: callbackUrl, token: cell.token },
-        repo: repoId,
-        snapshot,
-        trace: traceTarget,
-        request,
-      }),
-      signal: AbortSignal.timeout(10 * 60_000),
+    const body = JSON.stringify({
+      provider: { kind: provider.kind, baseUrl: provider.baseUrl, apiKey: provider.key },
+      model,
+      callback: { url: callbackUrl, token: cell.token },
+      repo: repoId,
+      snapshot,
+      trace: traceTarget,
+      request,
     });
-    const data = (await res.json().catch(() => ({}))) as Partial<AgentAnswer<T>> & {
-      error?: string;
-    };
-    if (!res.ok || data.result === undefined)
-      throw new Error(`reviewer cell: ${data.error ?? `status ${res.status}`}`);
-    return {
-      result: data.result,
-      inputTokens: data.inputTokens ?? 0,
-      outputTokens: data.outputTokens ?? 0,
-      cacheReadTokens: data.cacheReadTokens ?? 0,
-      cacheWriteTokens: data.cacheWriteTokens ?? 0,
-      costUsd: data.costUsd ?? 0,
-      priced: data.priced ?? false,
-      toolCalls: data.toolCalls ?? 0,
-    };
+    // The cell works in parts inside its own time budget and answers "running" between them;
+    // asking again with the same body resumes the stored conversation.
+    for (;;) {
+      const res = await fetchImpl(`${cell.url}/runs/${encodeURIComponent(reviewId)}/${stage}`, {
+        method: "POST",
+        headers: traceHeaders(cellHeaders(cell)),
+        body,
+        signal: AbortSignal.timeout(10 * 60_000),
+      });
+      const data = (await res.json().catch(() => ({}))) as Partial<AgentAnswer<T>> & {
+        status?: "running" | "done";
+        error?: string;
+      };
+      if (!res.ok) throw new Error(`reviewer cell: ${data.error ?? `status ${res.status}`}`);
+      if (data.status === "running") continue;
+      if (data.result === undefined) throw new Error("reviewer cell: answered without a result");
+      return {
+        result: data.result,
+        inputTokens: data.inputTokens ?? 0,
+        outputTokens: data.outputTokens ?? 0,
+        cacheReadTokens: data.cacheReadTokens ?? 0,
+        cacheWriteTokens: data.cacheWriteTokens ?? 0,
+        costUsd: data.costUsd ?? 0,
+        priced: data.priced ?? false,
+        toolCalls: data.toolCalls ?? 0,
+      };
+    }
   };
   return {
     skeleton: (req) =>

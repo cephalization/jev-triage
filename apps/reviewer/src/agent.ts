@@ -12,9 +12,9 @@ import {
   NO_USAGE,
   usageOf,
   type CallUsage,
-  type Completion,
   type ProviderSpec,
 } from "./pi.ts";
+import type { StepResult } from "./resume.ts";
 
 /**
  * The agent loop: one prompt, a small set of repository tools, and jev behind `rank_files`
@@ -71,11 +71,15 @@ export function snapshotClient(
   };
 }
 
-export interface AgentRun extends Completion {
-  toolCalls: number;
+/** How long one part works before handing the conversation back to be resumed. */
+export interface AgentOptions {
+  /** Epoch ms: after the first turn that ends past this, return with `text: null`. */
+  yieldAfter: number;
+  /** Turns already taken in this attempt by earlier parts. */
+  turns: number;
 }
 
-/** A ceiling on tool turns per call, far above any review; the API's ten-minute timeout is the real limit. */
+/** A ceiling on model turns per attempt, far above any review. */
 const MAX_TURNS = 200;
 const READ_LINES = 400;
 
@@ -256,21 +260,27 @@ export async function runTool(
   );
 }
 
-/** Ask with tools until the model answers in text. */
+/**
+ * Ask with tools until the model answers in text or the part's time is up. `messages` is the
+ * conversation so far (a single user prompt to start) and is extended in place, so the caller
+ * can store it and resume later with the same array.
+ */
 export async function runAgent(
   spec: ProviderSpec,
   modelId: string,
-  prompt: string,
+  messages: Message[],
   host: ToolHost,
-): Promise<AgentRun> {
+  options: AgentOptions,
+): Promise<StepResult> {
   const m = models();
   const { model, priced } = modelFor(spec, modelId);
-  const messages: Message[] = [{ role: "user", content: prompt, timestamp: Date.now() }];
   const tools = toolDefinitions();
   const tracer = host.tracer ?? noopTracer;
   let usage: CallUsage = NO_USAGE;
   let toolCalls = 0;
-  for (let turn = 0; turn < MAX_TURNS; turn += 1) {
+  let turns = options.turns;
+  while (turns < MAX_TURNS) {
+    const turn = turns;
     const r = await tracer.startActiveSpan(
       `${spec.kind}.completion`,
       { attributes: llmRequestAttributes(spec, modelId, model.maxTokens, turn, messages, tools) },
@@ -298,6 +308,7 @@ export async function runAgent(
         }
       },
     );
+    turns += 1;
     usage = addUsage(usage, usageOf(r.usage, priced));
     if (r.stopReason === "error" || r.stopReason === "aborted")
       throw new Error(`${spec.kind} ${modelId}: ${r.errorMessage ?? r.stopReason}`);
@@ -306,7 +317,8 @@ export async function runAgent(
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
       .map((c) => c.text)
       .join("");
-    if (calls.length === 0 || r.stopReason !== "toolUse") return { text, ...usage, toolCalls };
+    if (calls.length === 0 || r.stopReason !== "toolUse")
+      return { text, messages, turns, toolCalls, ...usage };
     messages.push(r);
     for (const call of calls) {
       toolCalls += 1;
@@ -320,6 +332,8 @@ export async function runAgent(
         timestamp: Date.now(),
       });
     }
+    if (Date.now() >= options.yieldAfter)
+      return { text: null, messages, turns, toolCalls, ...usage };
   }
   throw new Error(`the agent used ${MAX_TURNS} tool turns without answering`);
 }

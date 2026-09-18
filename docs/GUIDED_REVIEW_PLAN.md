@@ -95,7 +95,11 @@ A `review` job fetches the pull request at its head commit and runs a headless a
   (`ghcr.io/denoland/celld`) on a bundle `vp run dev` builds with esbuild and keeps rebuilding;
   no binary is installed. Without the cell generation is refused with that reason; there is no
   in-process runner. The diff comes from GitHub's pull request diff endpoint with the server token.
-  Ten-minute timeout, one run in flight per pull request, orphaned runs failed on restart.
+  A cell answers each request inside celld's handler budget (300 s by default), so a stage runs
+  in parts: the agent works for a minute of turns, the cell stores the conversation in its
+  SQLite and answers `running`, and the API posts the same body again to resume it
+  (`apps/reviewer/src/resume.ts`). One run in flight per pull request, orphaned runs failed on
+  restart.
 - **Isolation.** The cell is the agent's environment: a Durable Object per review with its own
   storage, no process, no shell, network only to the provider. That is enough for a diff-only
   review. When the agent needs to read the repository, give the cell a snapshot (tarball or
