@@ -52,7 +52,10 @@ export function snapshotClient(
       headers: injectTraceHeaders(),
     });
     if (res.status === 404) return null;
-    if (!res.ok) throw new Error(`snapshot ${tail} answered ${res.status}`);
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")).slice(0, 500);
+      throw new Error(`snapshot ${tail} answered ${res.status}${detail ? `: ${detail}` : ""}`);
+    }
     return (await res.json()) as T;
   };
   return {
@@ -229,7 +232,13 @@ export async function runTool(
     },
     async (span) => {
       try {
-        const result = await run();
+        // A tool that throws is a failed call, not a failed review: the model sees the message
+        // as the tool's result and can change its arguments or its approach.
+        const result = await run().catch((e: unknown) => {
+          const error = e instanceof Error ? e : new Error(String(e));
+          span.recordException(error);
+          return { text: `${name} failed: ${error.message}`, isError: true };
+        });
         span.setAttributes({
           [S.OUTPUT_VALUE]: clip(result.text, 40_000),
           [S.OUTPUT_MIME_TYPE]: "text/plain",

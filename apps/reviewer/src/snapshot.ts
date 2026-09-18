@@ -165,11 +165,17 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
     });
   }
 
+  /**
+   * Files under a path prefix. Compared with substr, not LIKE: workerd caps LIKE patterns at a
+   * few dozen characters ("LIKE or GLOB pattern too complex"), and agents ask for deep paths.
+   */
   list(prefix: string, limit: number): { path: string; size: number }[] {
+    const clean = prefix.replace(/^\.?\/+/, "");
     return this.ctx.storage.sql
       .exec<{ path: string; size: number }>(
-        "SELECT path, size FROM file WHERE path LIKE ? ORDER BY path LIMIT ?",
-        `${prefix.replace(/[%_]/g, "")}%`,
+        "SELECT path, size FROM file WHERE substr(path, 1, ?) = ? ORDER BY path LIMIT ?",
+        clean.length,
+        clean,
         limit,
       )
       .toArray();
@@ -186,7 +192,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
     );
   }
 
-  /** Literal or regular-expression search; a LIKE prefilter keeps the JS scan small. */
+  /** Literal or regular-expression search; an instr prefilter keeps the JS scan small. */
   grep(
     pattern: string,
     glob: string | null,
