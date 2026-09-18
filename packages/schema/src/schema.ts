@@ -65,6 +65,7 @@ const user = table("user")
     avatar_url: string().optional(),
     role: string(),
     last_login_at: number().optional(),
+    revoked_at: number().optional(),
     created_at: number(),
   })
   .primaryKey("id");
@@ -116,6 +117,7 @@ const repo = table("repo")
     paused: boolean(),
     review_provider_id: string().optional(),
     review_model: string().optional(),
+    review_budget_tokens: number(),
     created_at: number(),
   })
   .primaryKey("id");
@@ -200,6 +202,7 @@ const pull = table("pull")
     author: string(),
     author_association: string(),
     head_ref: string(),
+    head_sha: string().optional(),
     base_ref: string(),
     additions: number(),
     deletions: number(),
@@ -244,6 +247,10 @@ const guidedReview = table("guided_review")
     finished_at: number().optional(),
     /** 'agent' for model-written steps, 'seed' when the file classification stood in. */
     source: string(),
+    /** While running: snapshot | classify | skeleton | assign | narrate. */
+    phase: string().optional(),
+    tool_calls: number(),
+    reused_steps: number(),
   })
   .primaryKey("id");
 
@@ -429,6 +436,7 @@ const pullRelationships = relationships(pull, ({ many, one }) => ({
 
 const guidedReviewRelationships = relationships(guidedReview, ({ many, one }) => ({
   pull: one({ sourceField: ["pull_id"], destSchema: pull, destField: ["id"] }),
+  creator: one({ sourceField: ["created_by"], destSchema: user, destField: ["id"] }),
   files: many({ sourceField: ["id"], destSchema: guidedReviewFile, destField: ["review_id"] }),
 }));
 

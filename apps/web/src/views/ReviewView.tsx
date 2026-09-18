@@ -12,8 +12,9 @@ import { SectionLabel, Tag } from "../components/Marks.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { KeyHelp, ViewHeader } from "../components/ViewHeader.tsx";
+import { isStale } from "../components/GuidedReview.tsx";
 import { fetchReviewPatch, generateGuidedReview } from "../lib/api.ts";
-import { ago } from "../lib/format.ts";
+import { ago, compact, reviewPhaseText } from "../lib/format.ts";
 import { isTyping } from "../lib/keys.ts";
 import { useNow } from "../lib/presence.ts";
 import { reviewRoute, rootRoute } from "../router.tsx";
@@ -62,8 +63,13 @@ export function ReviewView() {
 
   const reviews = pull?.guidedReviews ?? [];
   const latest = reviews[0] ?? null;
-  const ready = useMemo(() => reviews.find((r) => r.status === "ready") ?? null, [reviews]);
   const running = latest?.status === "queued" || latest?.status === "running";
+  // The newest ready review, or the skeleton of a first run once its steps are named.
+  const ready = useMemo(() => {
+    const done = reviews.find((r) => r.status === "ready") ?? null;
+    if (done) return done;
+    return latest && running && (latest.groups_json?.length ?? 0) > 0 ? latest : null;
+  }, [reviews, latest, running]);
 
   // The patch is server-side; fetch it once per ready review and parse it for the renderer.
   const [patch, setPatch] = useState<{ id: string; text: string } | null>(null);
@@ -206,18 +212,25 @@ export function ReviewView() {
 
   const loading = result.type !== "complete" && !pull;
   const doneCount = steps.filter((s) => s.markable && mine.has(s.name)).length;
+  const stale = !!ready && isStale(ready, pull?.head_sha ?? null);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col animate-in fade-in slide-in-from-bottom-2 duration-300 motion-reduce:animate-none">
       <ViewHeader title="Guided review">
         {ready && (
-          <span className="text-xs text-muted-foreground">
+          <span className="truncate text-xs text-muted-foreground">
             {ready.source === "seed" ? "classified order" : ready.model} ·{" "}
-            {ago(ready.finished_at, now)}
-            {running && " · regenerating…"}
+            {compact(ready.input_tokens)} in / {compact(ready.output_tokens)} out
+            {ready.creator ? ` · by ${ready.creator.name}` : ""} · {ago(ready.finished_at, now)}
+            {running && ` · ${reviewPhaseText(latest?.phase).toLowerCase()}…`}
           </span>
         )}
-        <Button size="xs" variant="outline" onClick={regenerate} disabled={busy || running}>
+        <Button
+          size="xs"
+          variant={stale ? "default" : "outline"}
+          onClick={regenerate}
+          disabled={busy || running}
+        >
           {ready ? "Regenerate" : "Generate"}
         </Button>
         <KeyHelp rows={REVIEW_KEYS} />
@@ -247,6 +260,16 @@ export function ReviewView() {
       </div>
 
       {error && <p className="border-b px-4 py-2 text-xs text-destructive">{error}</p>}
+      {stale && !running && (
+        <p className="border-b bg-muted/40 px-4 py-2 text-xs text-pretty">
+          <span className="text-status-warning">New commits since this review</span>
+          <span className="text-muted-foreground">
+            {" "}
+            ({ready.head_sha!.slice(0, 7)} → {pull!.head_sha!.slice(0, 7)}). The steps below
+            describe the older diff; regenerate when you want the new changes folded in.
+          </span>
+        </p>
+      )}
       {ready?.source === "seed" && ready.error && (
         <p className="border-b bg-muted/40 px-4 py-2 text-xs text-muted-foreground text-pretty">
           The model failed to write the walkthrough ({ready.error}). These steps are the code's
@@ -267,7 +290,16 @@ export function ReviewView() {
               {step && (
                 <>
                   <h2 className="text-base font-semibold text-balance">{step.name}</h2>
-                  <p className="text-sm leading-6 text-foreground/80 text-pretty">{step.summary}</p>
+                  {step.summary ? (
+                    <p className="text-sm leading-6 text-foreground/80 text-pretty">
+                      {step.summary}
+                    </p>
+                  ) : (
+                    <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
+                      Writing this step…
+                    </p>
+                  )}
                   <div className="flex flex-col gap-1">
                     {step.files.map((path) => {
                       const c = parsed.counts.get(path) ?? fileRows.get(path);
@@ -448,7 +480,7 @@ function Empty({
   loading,
 }: {
   pull: { files_json: string[] } | null | undefined;
-  latest: { status: string; error?: string | null; model: string } | null;
+  latest: { status: string; error?: string | null; model: string; phase?: string | null } | null;
   running: boolean;
   loading: boolean;
 }) {
@@ -457,10 +489,10 @@ function Empty({
       {running ? (
         <>
           <span className="size-4 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
-          <p className="font-medium">Generating with {latest?.model}…</p>
+          <p className="font-medium">{reviewPhaseText(latest?.phase)}…</p>
           <p className="max-w-md text-sm text-muted-foreground text-pretty">
-            Classifying every file, then writing the walkthrough. This takes a minute; the page
-            fills in when it is ready.
+            The steps appear as soon as they are named; their text fills in after. Generating with{" "}
+            {latest?.model}.
           </p>
         </>
       ) : latest?.status === "failed" ? (

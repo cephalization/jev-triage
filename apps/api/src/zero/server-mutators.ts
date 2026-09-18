@@ -1,6 +1,14 @@
 import { defineMutator, defineMutators } from "@rocicorp/zero";
-import { feedbackSetArgs, mutators, providerRemoveArgs, repoRecalculateArgs } from "@triage/schema";
+import {
+  feedbackSetArgs,
+  inviteAddArgs,
+  inviteRemoveArgs,
+  mutators,
+  providerRemoveArgs,
+  repoRecalculateArgs,
+} from "@triage/schema";
 import { clearProviderKey } from "../providers/store.ts";
+import { setRevoked } from "../revoked.ts";
 
 /**
  * Server-side overrides of the shared mutators. They run the same logic, then append
@@ -18,6 +26,18 @@ export function createServerMutators(
         // A confirmation (reclassify=false) changes nothing the model should redo.
         if (args.reclassify)
           asyncTasks.push(async () => poke(args.repoId, `feedback:${args.kind}`));
+      }),
+    },
+    invite: {
+      // The allowlist is also the session list: removing an invite ends that person's access
+      // now, not at their next sign-in, and a fresh invite restores it.
+      add: defineMutator(inviteAddArgs, async ({ tx, ctx, args }) => {
+        await mutators.invite.add.fn({ tx, ctx, args });
+        asyncTasks.push(() => setRevoked(args.login, false));
+      }),
+      remove: defineMutator(inviteRemoveArgs, async ({ tx, ctx, args }) => {
+        await mutators.invite.remove.fn({ tx, ctx, args });
+        asyncTasks.push(() => setRevoked(args.login, true));
       }),
     },
     provider: {

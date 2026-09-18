@@ -51,6 +51,7 @@ const QUERY = /* GraphQL */ `
           }
           authorAssociation
           headRefName
+          headRefOid
           baseRefName
           additions
           deletions
@@ -122,6 +123,7 @@ interface PullNode {
   author: { login: string } | null;
   authorAssociation: string;
   headRefName: string;
+  headRefOid: string;
   baseRefName: string;
   additions: number;
   deletions: number;
@@ -292,6 +294,7 @@ async function upsertPulls(repoId: string, nodes: PullNode[]) {
     author: n.author?.login ?? "",
     author_association: n.authorAssociation ?? "",
     head_ref: n.headRefName,
+    head_sha: n.headRefOid ?? null,
     base_ref: n.baseRefName,
     additions: n.additions,
     deletions: n.deletions,
@@ -351,6 +354,7 @@ async function upsertPulls(repoId: string, nodes: PullNode[]) {
       "author",
       "author_association",
       "head_ref",
+      "head_sha",
       "base_ref",
       "additions",
       "deletions",
@@ -370,7 +374,7 @@ async function upsertPulls(repoId: string, nodes: PullNode[]) {
     )}
       on conflict (id) do update set title = excluded.title, body = excluded.body, state = excluded.state,
         draft = excluded.draft, author = excluded.author, author_association = excluded.author_association,
-        head_ref = excluded.head_ref, base_ref = excluded.base_ref, additions = excluded.additions,
+        head_ref = excluded.head_ref, head_sha = excluded.head_sha, base_ref = excluded.base_ref, additions = excluded.additions,
         deletions = excluded.deletions, changed_files = excluded.changed_files, files_json = excluded.files_json,
         labels_json = excluded.labels_json, requested_reviewers_json = excluded.requested_reviewers_json,
         review_decision = excluded.review_decision, mergeable = excluded.mergeable, comments = excluded.comments,

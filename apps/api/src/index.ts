@@ -16,6 +16,9 @@ import {
 import { isSyncing, syncRepo } from "./github/sync.ts";
 import { isKind, KINDS, listModels } from "./providers/catalog.ts";
 import { failOrphanedReviews, isGenerating, runReviewJob } from "./review/job.ts";
+import { askSystemOne } from "./review/jev.ts";
+import { overBudget, RateLimiter } from "./review/limits.ts";
+import { noul } from "@typesafe-ai/sdk";
 import {
   clearProviderKey,
   getProvider,
@@ -195,9 +198,18 @@ const reviewBody = z.object({
   model: z.string().max(200).optional(),
 });
 /** Queue a walkthrough of a pull request; progress streams through the guided_review row. */
+/** Generation is the expensive action: a dozen per person per ten minutes is plenty. */
+const reviewLimiter = new RateLimiter(12, 10 * 60_000);
+
 app.post("/api/reviews", async (c) => {
   const ctx = await contextFromRequest(c.req.raw);
   if (!ctx) return c.json({ error: "sign in first" }, 401);
+  const gate = reviewLimiter.take(ctx.userID);
+  if (!gate.ok)
+    return c.json(
+      { error: `slow down: try again in ${Math.ceil(gate.retryAfterMs / 1000)} s` },
+      429,
+    );
   const parsed = reviewBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "pullId required" }, 400);
   const { pullId } = parsed.data;
@@ -207,10 +219,18 @@ app.post("/api/reviews", async (c) => {
       repo_id: string;
       review_provider_id: string | null;
       review_model: string | null;
+      review_budget_tokens: number;
+      spent: number;
     }[]
-  >`select p.id, p.repo_id, r.review_provider_id, r.review_model
+  >`select p.id, p.repo_id, r.review_provider_id, r.review_model, r.review_budget_tokens,
+      coalesce((select sum(input_tokens + output_tokens) from guided_review where repo_id = r.id), 0)::int as spent
       from pull p join repo r on r.id = p.repo_id where p.id = ${pullId}`;
   if (!pull) return c.json({ error: "no such pull request" }, 404);
+  if (overBudget(pull.spent, pull.review_budget_tokens))
+    return c.json(
+      { error: "this repository's review token budget is spent; raise it under System" },
+      400,
+    );
   const providerId = parsed.data.providerId ?? pull.review_provider_id;
   const model = parsed.data.model ?? pull.review_model;
   if (!providerId || !model)
@@ -221,6 +241,94 @@ app.post("/api/reviews", async (c) => {
     values (${id}, ${pullId}, ${pull.repo_id}, ${providerId}, ${model}, ${ctx.userID})`;
   void runReviewJob(id, { systemOne });
   return c.json({ id }, 202);
+});
+
+/**
+ * jev behind the agent's `rank_files` tool: which of the candidate paths are relevant to the
+ * question. Called by the reviewer cell, never by browsers: the shared token gates it when
+ * one is configured, and loopback is required otherwise.
+ */
+const rerankBody = z.object({
+  repo: z.string().min(3),
+  question: z.string().min(1).max(500),
+  candidates: z.array(z.string().min(1).max(500)).min(1).max(40),
+});
+app.post("/api/internal/rerank", async (c) => {
+  const token = c.req.header("x-reviewer-token") ?? null;
+  const host = c.req.header("host") ?? "";
+  const local = /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(host);
+  if (env.reviewCellToken ? token !== env.reviewCellToken : !local)
+    return c.json({ error: "reviewer only" }, 403);
+  if (!systemOne) return c.json({ error: "no classifier configured" }, 503);
+  const parsed = rerankBody.safeParse(await c.req.json().catch(() => null));
+  if (!parsed.success) return c.json({ error: "question and candidates required" }, 400);
+  const { repo, question, candidates } = parsed.data;
+  const questions: Record<string, ReturnType<typeof noul>> = {};
+  candidates.forEach((_, i) => {
+    questions[`r${i}`] = noul(
+      `Is \`candidates[${i}]\` likely to contain what the question needs? Judge from the path alone: its directory, name and extension.`,
+      {
+        true: "The path names the module, type, test or config the question is about, or a direct caller or definition of it",
+        false: "Unrelated area, generated output, or a file the question would not need",
+      },
+    );
+  });
+  try {
+    const result = await askSystemOne(systemOne, {
+      repoId: repo,
+      kind: "review_rerank",
+      state: { question, candidates: candidates.map((path) => ({ path })) },
+      questions,
+      items: candidates.length,
+    });
+    const ranked = candidates
+      .map((path, i) => {
+        const a = result.answers[`r${i}`] as { noul?: number } | undefined;
+        return { path, relevance: a?.noul ?? 0 };
+      })
+      .sort((a, b) => b.relevance - a.relevance);
+    return c.json({ ranked });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
+  }
+});
+
+/** What the reviewer cells hold for a repository: snapshots and run records, with sizes. */
+app.get("/api/repos/:owner/:name/cell", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "sign in first" }, 401);
+  if (!env.reviewCellUrl) return c.json({ configured: false });
+  try {
+    const res = await fetch(
+      `${env.reviewCellUrl}/repos/${c.req.param("owner")}/${c.req.param("name")}/stats`,
+      {
+        headers: env.reviewCellToken ? { "x-reviewer-token": env.reviewCellToken } : {},
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    if (!res.ok) return c.json({ configured: true, reachable: false });
+    const stats = (await res.json()) as Record<string, unknown>;
+    return c.json({ configured: true, reachable: true, ...stats });
+  } catch {
+    return c.json({ configured: true, reachable: false });
+  }
+});
+
+app.delete("/api/repos/:owner/:name/cell/snapshots/:sha", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "sign in first" }, 401);
+  if (!env.reviewCellUrl) return c.json({ error: "no reviewer cell" }, 400);
+  const sha = c.req.param("sha");
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) return c.json({ error: "bad sha" }, 400);
+  const res = await fetch(
+    `${env.reviewCellUrl}/snapshots/${c.req.param("owner")}/${c.req.param("name")}/${sha}`,
+    {
+      method: "DELETE",
+      headers: env.reviewCellToken ? { "x-reviewer-token": env.reviewCellToken } : {},
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  return c.json({ ok: res.ok }, res.ok ? 200 : 502);
 });
 
 /** The unified diff a review was generated from, for rendering its steps. */
@@ -248,8 +356,11 @@ app.get("/api/auth/admins", async (c) => {
 app.get("/api/auth/me", async (c) => {
   const ctx = await contextFromRequest(c.req.raw);
   if (!ctx) return c.json({ error: "invalid or expired token" }, 401);
-  const [row] = await sql<{ id: string }[]>`select id from "user" where id = ${ctx.userID}`;
+  const [row] = await sql<
+    { id: string; revoked_at: Date | null }[]
+  >`select id, revoked_at from "user" where id = ${ctx.userID}`;
   if (!row) return c.json({ error: "account no longer exists; sign in again" }, 401);
+  if (row.revoked_at) return c.json({ error: "access was removed by an admin" }, 401);
   return c.json({ user: ctx });
 });
 

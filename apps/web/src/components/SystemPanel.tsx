@@ -8,6 +8,7 @@ import { costOf, pokeWorker, usePrices } from "../lib/api.ts";
 import type { Session } from "../lib/auth.ts";
 import { People } from "./People.tsx";
 import { Providers } from "./Providers.tsx";
+import { ReviewActivity } from "./ReviewActivity.tsx";
 import { ReviewDefaults } from "./ReviewDefaults.tsx";
 import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
@@ -173,7 +174,7 @@ export function SystemPanel({
       {session.user.role === "admin" && (
         <Section
           title="People"
-          description="Who can sign in. Invite a GitHub login and choose a role; removing an invite stops the next sign-in."
+          description="Who can sign in. Invite a GitHub login and choose a role; removing an invite signs that person out at once."
         >
           <People session={session} adminLogins={adminLogins} now={now} />
         </Section>
@@ -194,6 +195,15 @@ export function SystemPanel({
           description="The provider and model used when someone generates a review of a pull request in this repo. Anyone can change it; a run can override it."
         >
           <ReviewDefaults repo={repo} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Review activity"
+          description="Every generation in this repo: who asked, which model, and the provider tokens it used. The budget caps the total; generation is refused once it is spent."
+        >
+          <ReviewActivity repo={repo} now={now} />
         </Section>
       )}
 

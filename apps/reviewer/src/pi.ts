@@ -31,7 +31,7 @@ export interface Completion {
 }
 
 let shared: MutableModels | null = null;
-function models(): MutableModels {
+export function models(): MutableModels {
   if (!shared) {
     shared = createModels();
     shared.setProvider(anthropicProvider());

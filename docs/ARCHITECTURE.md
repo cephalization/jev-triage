@@ -12,7 +12,7 @@ the [README](../README.md).
 | Hono on Node (`apps/api`)        | Zero mutate and query endpoints, GitHub sync, TypeSafe worker, dev auth      |
 | React (`apps/web`)               | Dashboard; reads the local replica, writes through mutators                  |
 | `@typesafe-ai/sdk` (server only) | Classification and duplicate reranking                                       |
-| celld cell (`apps/reviewer`)     | Guided reviews: one Durable Object per run drives the pi SDK; optional       |
+| celld cells (`apps/reviewer`)    | Guided reviews: a run cell drives the pi SDK; a snapshot cell per commit     |
 
 Clients never talk to GitHub or TypeSafe. They read Zero rows and call mutators; the server
 side of a mutator is where classification work is enqueued.
@@ -123,14 +123,18 @@ the code's `QUESTIONS_VERSION` when the code moves ahead.
 
 ### Guided review
 
-`POST /api/reviews` queues a `guided_review` row and `runReviewJob` drives it: the diff comes
-from GitHub, jev answers four questions per changed file (`packages/triage/src/review/files.ts`,
-stored in `guided_review_file`, one `run` row per batch), `groupSeed()` turns the answers into an
-ordered proposal, and the agent (the reviewer cell, or the in-process runner) writes the steps
-with the proposal as `<classification>`. If the agent fails, the proposal is served as the
-review with `source = 'seed'`. The screen at `/pulls/$pullId/review` reads the row, its file
-rows and everyone's `review_progress` marks through Zero, and fetches the patch from
-`/api/reviews/:id/patch`.
+`POST /api/reviews` queues a `guided_review` row and `runReviewJob` drives it in stages
+(`apps/api/src/review/stages.ts`). The diff comes from GitHub. The reviewer cell loads a
+snapshot of the repository at the head while jev answers four questions per changed file
+(`packages/triage/src/review/files.ts`, stored in `guided_review_file`, one `run` row per
+batch). The agent names the steps in one short call; jev assigns every file to a step in one
+request; the agent writes each step's text in parallel, reading the snapshot through
+`list_files`, `read_file`, `grep` and a jev-backed `rank_files`. Steps unchanged since the
+previous review are kept. Every stage streams through the row's `phase` and `groups_json`. Without
+a cell the same stages run in-process without tools; without jev the single-shot prompt runs; if
+the agent fails, jev's order is served as the review with `source = 'seed'`. The screen at
+`/pulls/$pullId/review` reads the row, its file rows and everyone's `review_progress` marks
+through Zero, and fetches the patch from `/api/reviews/:id/patch`.
 
 ### Presence
 
@@ -150,6 +154,9 @@ configured. A per-repo `budget_tokens` stops the worker when reached.
 - Secrets and the TypeSafe SDK live only in `apps/api`. Provider keys are sealed at rest and
   reach the reviewer cell only inside a request; the cell never stores them.
 - One in-flight request per repo; triggers during flight set a flag, never enqueue.
+- Guided reviews never regenerate on their own: a stale review warns and offers Regenerate.
+  Generation is rate limited per person and refused once the repo's review token budget is
+  spent. Removing an invite revokes that person's sessions at once.
 - Every model answer is stored with its `questions_version`; changing a question means a new
   version, never editing old rows.
 - `decide()` and the question builders are pure and covered by canned-answer tests; the only

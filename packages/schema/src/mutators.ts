@@ -59,6 +59,8 @@ export const repoSetKnobsArgs = z.object({
   /** Default provider and model for guided reviews; null clears. */
   reviewProviderId: z.string().nullable().optional(),
   reviewModel: z.string().max(200).nullable().optional(),
+  /** Provider tokens this repo's reviews may spend in total; 0 = unlimited. */
+  reviewBudgetTokens: z.number().int().min(0).optional(),
 });
 
 const modelSchema = z.object({
@@ -312,6 +314,9 @@ export const mutators = defineMutators({
           ? { review_provider_id: args.reviewProviderId }
           : {}),
         ...(args.reviewModel !== undefined ? { review_model: args.reviewModel } : {}),
+        ...(args.reviewBudgetTokens !== undefined
+          ? { review_budget_tokens: args.reviewBudgetTokens }
+          : {}),
       });
     }),
     recalculate: defineMutator(repoRecalculateArgs, async ({ tx, ctx, args }) => {

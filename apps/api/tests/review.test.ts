@@ -200,3 +200,20 @@ describe("cell reachability", () => {
     expect(await cellReachable({ url: "http://cell/" }, ok)).toBe(true);
   });
 });
+
+describe("generation guard rails", async () => {
+  const { RateLimiter, overBudget } = await import("../src/review/limits.ts");
+  test("rate limiter allows the window and then answers with a retry delay", () => {
+    const rl = new RateLimiter(2, 1000);
+    expect(rl.take("u", 0)).toEqual({ ok: true });
+    expect(rl.take("u", 100)).toEqual({ ok: true });
+    expect(rl.take("u", 200)).toEqual({ ok: false, retryAfterMs: 800 });
+    expect(rl.take("v", 200)).toEqual({ ok: true });
+    expect(rl.take("u", 1001)).toEqual({ ok: true });
+  });
+  test("budget: zero is unlimited, otherwise spent >= budget refuses", () => {
+    expect(overBudget(1_000_000, 0)).toBe(false);
+    expect(overBudget(999, 1000)).toBe(false);
+    expect(overBudget(1000, 1000)).toBe(true);
+  });
+});

@@ -3,7 +3,6 @@ import {
   generateReview,
   groupSeed,
   normalizeGroups,
-  renderClassification,
   splitPatch,
   type ClassifiedFile,
   type ReviewGroup,
@@ -16,14 +15,22 @@ import { resolveProvider } from "../providers/store.ts";
 import { cellReachable, runInCell } from "./cell.ts";
 import { classifyFiles, storeFileRows } from "./files.ts";
 import { complete, type Ask, type RunnerProvider } from "./runner.ts";
+import {
+  cellAgent,
+  generateStaged,
+  inProcessAgent,
+  loadSnapshotInCell,
+  type Phase,
+} from "./stages.ts";
 
 /**
  * One guided-review generation, from a queued row to ready or failed. Progress streams
- * through the row (status, started_at) so every viewer watches the same run. One run per
- * pull request at a time; a second request while one is in flight is refused by the route.
+ * through the row (status, phase, and the skeleton before its narratives) so every viewer
+ * watches the same run. One run per pull request at a time.
  *
- * Order of work: fetch the diff, ask jev about every file (the proposal), ask the agent for the
- * narrative with the proposal in hand, and if the agent fails serve the proposal as the review.
+ * With jev available the staged pipeline runs (snapshot and classification in parallel, a
+ * short skeleton call, jev assignment, narratives in parallel, unchanged steps kept). Without
+ * it the single-shot prompt runs, and if that fails the file classification alone is served.
  */
 
 const BODY_CHARS = 4000;
@@ -41,7 +48,7 @@ export interface Generated {
   outputTokens: number;
 }
 
-/** The pure core: snapshot in, groups out, with the retry and the normalisation applied. */
+/** The single-shot core: snapshot in, groups out, with the retry and the normalisation applied. */
 export async function generate(
   snapshot: PullSnapshot,
   previousGroups: readonly ReviewGroup[] | null,
@@ -133,8 +140,13 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
   if (inFlight.has(row.pull_id)) return;
   inFlight.add(row.pull_id);
   const t0 = Date.now();
+  const setPhase = async (phase: Phase | null, groups: ReviewGroup[] | null) => {
+    if (groups)
+      await sql`update guided_review set phase = ${phase}, groups_json = ${sql.json(groups)} where id = ${row.id}`;
+    else await sql`update guided_review set phase = ${phase} where id = ${row.id}`;
+  };
   try {
-    await sql`update guided_review set status = 'running', started_at = now() where id = ${row.id}`;
+    await sql`update guided_review set status = 'running', started_at = now(), phase = null where id = ${row.id}`;
     const [pull] = await sql<
       { number: number }[]
     >`select number from pull where id = ${row.pull_id}`;
@@ -145,27 +157,10 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
     const snapshot = await (deps.fetchSnapshot ?? fetchPullSnapshot)(row.repo_id, pull.number);
     const patchFiles = splitPatch(snapshot.diff);
     const allFiles = patchFiles.map((f) => f.path);
-
-    // The jev pass. Its failure is not the review's failure: the agent still runs, unguided.
-    let classified: ClassifiedFile[] = [];
-    if (deps.systemOne) {
-      try {
-        classified = await classifyFiles(deps.systemOne, row.repo_id, snapshot.intent, patchFiles);
-        await storeFileRows(row.id, classified);
-      } catch (e) {
-        console.warn(
-          `[review] ${row.id}: file classification failed, continuing without it: ${e instanceof Error ? e.message : String(e)}`,
-        );
-        classified = [];
-      }
-    }
-    const classification = classified.length > 0 ? renderClassification(classified) : null;
-
-    const [prev] = await sql<{ groups_json: ReviewGroup[] }[]>`
-      select groups_json from guided_review
-      where pull_id = ${row.pull_id} and status = 'ready' and id <> ${row.id}
-      order by created_at desc limit 1`;
-    const previousGroups = prev?.groups_json ?? null;
+    // The patch is stored now so the review screen can show diffs under the skeleton.
+    await sql`insert into private.review_patch (review_id, patch) values (${row.id}, ${snapshot.diff})
+      on conflict (review_id) do update set patch = excluded.patch`;
+    const ask: Ask = (prompt) => (deps.complete ?? complete)(provider, row.model, prompt);
 
     // A configured cell that is not answering (it crashed, or celld is not running) must not
     // cost the review: fall back to the in-process runner and say so.
@@ -175,52 +170,138 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
       console.warn(
         `[review] ${row.id}: reviewer cell at ${cellUrl} is not answering; running in-process`,
       );
+    const cell = useCell ? { url: cellUrl, token: env.reviewCellToken } : null;
 
-    let out: Generated;
+    const [prev] = await sql<{ id: string; groups_json: ReviewGroup[] }[]>`
+      select id, groups_json from guided_review
+      where pull_id = ${row.pull_id} and status = 'ready' and id <> ${row.id}
+      order by created_at desc limit 1`;
+    const [prevPatch] = prev
+      ? await sql<
+          { patch: string }[]
+        >`select patch from private.review_patch where review_id = ${prev.id}`
+      : [];
+
+    let out: Generated & { toolCalls: number; reusedSteps: number };
     let source = "agent";
     let agentError: string | null = null;
-    try {
-      out = useCell
-        ? await runInCell({ url: cellUrl, token: env.reviewCellToken }, row.id, {
+    let classified: ClassifiedFile[] = [];
+    const systemOne = deps.systemOne;
+    if (systemOne) {
+      try {
+        const staged = await generateStaged({
+          reviewId: row.id,
+          repoId: row.repo_id,
+          intent: snapshot.intent,
+          headSha: snapshot.headSha,
+          patch: snapshot.diff,
+          previous: prev && prevPatch ? { groups: prev.groups_json, patch: prevPatch.patch } : null,
+          systemOne,
+          loadSnapshot: () =>
+            cell
+              ? loadSnapshotInCell(cell, row.repo_id, snapshot.headSha, {
+                  token: env.githubToken,
+                  apiBase: env.githubSyncApiUrl,
+                })
+              : Promise.resolve(null),
+          agent: (snap) =>
+            cell
+              ? cellAgent(
+                  cell,
+                  row.id,
+                  row.repo_id,
+                  provider,
+                  row.model,
+                  `http://127.0.0.1:${env.port}`,
+                  snap,
+                )
+              : inProcessAgent(ask),
+          classify: async (intent, files) => {
+            const c = await classifyFiles(systemOne, row.repo_id, intent, files);
+            await storeFileRows(row.id, c);
+            return c;
+          },
+          onPhase: setPhase,
+        });
+        classified = staged.classified;
+        out = {
+          groups: normalizeGroups(staged.groups, allFiles),
+          files: allFiles,
+          inputTokens: staged.inputTokens,
+          outputTokens: staged.outputTokens,
+          toolCalls: staged.toolCalls,
+          reusedSteps: staged.reusedSteps,
+        };
+      } catch (e) {
+        agentError = e instanceof Error ? e.message : String(e);
+        // Whatever jev classified before the failure still makes a review.
+        const rows = await sql<
+          { n: number }[]
+        >`select count(*)::int as n from guided_review_file where review_id = ${row.id}`;
+        if (rows[0]?.n === 0) throw e;
+        const stored = await sql<
+          {
+            path: string;
+            status: string;
+            added: number;
+            removed: number;
+            role: string;
+            risk: number | null;
+            attention: number | null;
+            entry: number | null;
+            role_confidence: number | null;
+          }[]
+        >`select path, status, added, removed, role, risk, attention, entry, role_confidence from guided_review_file where review_id = ${row.id}`;
+        classified = stored.map((r) => ({
+          path: r.path,
+          status: r.status as ClassifiedFile["status"],
+          added: r.added,
+          removed: r.removed,
+          signal: {
+            role: r.role as ClassifiedFile["signal"]["role"],
+            roleConfidence: r.role_confidence,
+            risk: r.risk,
+            attention: r.attention,
+            entry: r.entry,
+            probabilities: {},
+          },
+        }));
+        console.warn(
+          `[review] ${row.id}: agent failed, serving the classified order: ${agentError}`,
+        );
+        out = { ...seedReview(classified, allFiles), toolCalls: 0, reusedSteps: 0 };
+        source = "seed";
+      }
+    } else {
+      // No jev: the single-shot prompt, through the cell or in-process.
+      const previousGroups = prev?.groups_json ?? null;
+      const single = cell
+        ? await runInCell(cell, row.id, {
             provider,
             model: row.model,
-            request: {
-              patch: snapshot.diff,
-              intent: snapshot.intent,
-              previousGroups,
-              classification,
-            },
+            request: { patch: snapshot.diff, intent: snapshot.intent, previousGroups },
           })
-        : await generate(
-            snapshot,
-            previousGroups,
-            (prompt) => (deps.complete ?? complete)(provider, row.model, prompt),
-            classification,
-          );
-    } catch (e) {
-      if (classified.length === 0) throw e;
-      agentError = e instanceof Error ? e.message : String(e);
-      console.warn(`[review] ${row.id}: agent failed, serving the classified order: ${agentError}`);
-      out = seedReview(classified, allFiles);
-      source = "seed";
+        : await generate(snapshot, previousGroups, ask, null);
+      out = { ...single, toolCalls: 0, reusedSteps: 0 };
     }
 
     await sql.begin(async (tx) => {
-      await tx`update guided_review set status = 'ready', head_sha = ${snapshot.headSha},
+      await tx`update guided_review set status = 'ready', phase = null, head_sha = ${snapshot.headSha},
         groups_json = ${sql.json(out.groups)}, file_count = ${out.files.length},
         input_tokens = ${out.inputTokens}, output_tokens = ${out.outputTokens},
+        tool_calls = ${out.toolCalls}, reused_steps = ${out.reusedSteps},
         source = ${source}, error = ${agentError === null ? null : agentError.slice(0, 500)},
         finished_at = now() where id = ${row.id}`;
       await tx`insert into private.review_patch (review_id, patch) values (${row.id}, ${snapshot.diff})
         on conflict (review_id) do update set patch = excluded.patch`;
     });
     console.log(
-      `[review] ${row.repo_id}#${pull.number}: ${out.groups.length} steps over ${out.files.length} files, ${out.inputTokens} in / ${out.outputTokens} out, ${Date.now() - t0} ms, ${row.model}${useCell ? " (cell)" : ""}${source === "seed" ? " (seed)" : ""}`,
+      `[review] ${row.repo_id}#${pull.number}: ${out.groups.length} steps over ${out.files.length} files (${classified.length} classified, ${out.reusedSteps} kept), ${out.inputTokens} in / ${out.outputTokens} out, ${out.toolCalls} tool calls, ${Date.now() - t0} ms, ${row.model}${useCell ? " (cell)" : ""}${source === "seed" ? " (seed)" : ""}`,
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn(`[review] ${row.id} failed: ${message}`);
-    await sql`update guided_review set status = 'failed', error = ${message.slice(0, 500)}, finished_at = now() where id = ${row.id}`;
+    await sql`update guided_review set status = 'failed', phase = null, error = ${message.slice(0, 500)}, finished_at = now() where id = ${row.id}`;
   } finally {
     inFlight.delete(row.pull_id);
   }
@@ -228,6 +309,6 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
 
 /** Rows left running by a previous process are failed on startup rather than spinning forever. */
 export async function failOrphanedReviews(): Promise<void> {
-  await sql`update guided_review set status = 'failed', error = 'the server restarted during generation', finished_at = now()
+  await sql`update guided_review set status = 'failed', phase = null, error = 'the server restarted during generation', finished_at = now()
     where status in ('queued', 'running')`;
 }

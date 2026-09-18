@@ -143,13 +143,45 @@ The agent writes narrative; jev supplies structure it can rely on, cheaply and r
 - Files GitHub lists now that the review never saw appear as a final "Changed since generation"
   step until someone regenerates. The pull panel links into the screen once a review is ready.
 
-## Phase 6: regeneration, cost, hardening
+## Phase 6: regeneration, cost, hardening (done)
 
-- Regenerate when the PR head changes; keep prior reviews for comparison, like classification
-  versions.
-- Per-review token accounting into `run` rows and the System spend tile; a per-repo review
-  budget.
-- Session revocation on invite removal; rate limits on generation; audit of who generated what.
+- **Stale reviews warn, never auto-regenerate.** Pull sync stores GitHub's head commit
+  (`pull.head_sha`); a review whose `head_sha` differs is stale. The panel and the review screen
+  say so with both short SHAs and promote the Regenerate button; the old steps stay readable.
+  Prior reviews stay as rows, like classification versions.
+- **Cost.** jev's file pass is a `run` row per batch and counts toward the TypeSafe spend
+  tile. Provider tokens live on each `guided_review` row; System → Review activity lists every
+  generation (who, pull, model, tokens, when) and holds `repo.review_budget_tokens`; once the
+  repo's reviews have spent it, `POST /api/reviews` refuses with a message. Prices differ per
+  provider, so this counts tokens rather than dollars.
+- **Hardening.** Removing an invite sets `user.revoked_at` and every request with that person's
+  token is refused within seconds (`apps/api/src/revoked.ts`, checked in `contextFromRequest`);
+  a fresh invite clears it. Generation is rate limited per person (twelve per ten minutes,
+  429 with a retry delay). `guided_review.created_by` is shown on the review screen and in the
+  activity list.
+
+## Phase 7: staged generation, repository snapshots, tools (done)
+
+Generation no longer waits on one long answer. jev takes the bookkeeping and the search; the
+agent writes, in parallel, with the repository within reach.
+
+- **Stages.** Snapshot load and file classification run side by side. The agent names the
+  steps (a short call: names and one-line intents). jev places every file in a step (one Choice
+  per file over the step names, one request). The agent writes each step's narrative in its own
+  call with only that step's files, six at a time. The row's `phase` and the skeleton stream to
+  every viewer; the screen shows steps with "Writing this step…" until each text lands.
+- **Incremental regeneration.** Hunks are compared ignoring offsets; jev judges whether the
+  rest changed materially. Steps whose files are all unchanged are kept whole (name, text, marks)
+  and the skeleton is told to leave them alone. `reused_steps` records it.
+- **Repository snapshots.** `RepoSnapshot` is a celld cell per `owner/repo@sha`: GitHub's tarball
+  streamed through a tar reader into SQLite, text files only, vendored trees, binaries and
+  lockfiles skipped. Shared by every review of that head. The agent gets `list_files`,
+  `read_file`, `grep` and `rank_files` (jev, through `POST /api/internal/rerank`, so the SDK and
+  key stay in the API). The cell has no shell; running code is a later, container-shaped tier.
+- **Footprint.** `RepoIndex` is a cell per repository that ledgers every snapshot (files, text
+  bytes, SQLite bytes) and run record. Repo → "Review environment" shows the totals, each
+  snapshot with its size and age, and a delete per snapshot. The API proxies it at
+  `GET /api/repos/:owner/:name/cell`.
 
 ## Testing
 

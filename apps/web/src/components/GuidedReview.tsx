@@ -3,13 +3,15 @@ import { ArrowRight } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { generateGuidedReview } from "../lib/api.ts";
 import type { Session } from "../lib/auth.ts";
-import { ago } from "../lib/format.ts";
+import { ago, reviewPhaseText } from "../lib/format.ts";
 import { SectionLabel } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
 
 export interface GuidedReviewRow {
   id: string;
   status: string;
+  head_sha: string | null;
+  phase: string | null;
   model: string;
   groups_json: { name: string; summary: string; files: string[] }[];
   file_count: number;
@@ -27,14 +29,22 @@ export interface GuidedReviewRow {
  * themselves live on the review screen. A run this tab started opens that screen by itself
  * when it finishes.
  */
+/** A review is stale when GitHub reports a different head commit than the one it read. */
+export function isStale(review: { head_sha: string | null }, headSha: string | null): boolean {
+  return !!review.head_sha && !!headSha && review.head_sha !== headSha;
+}
+
 export function GuidedReview({
   pullId,
+  headSha,
   reviews,
   hasDefault,
   session,
   now,
 }: {
   pullId: string;
+  /** The pull request's current head commit, from the last sync. */
+  headSha: string | null;
   /** Newest first. */
   reviews: readonly GuidedReviewRow[];
   /** The repo has a default provider and model. */
@@ -49,6 +59,7 @@ export function GuidedReview({
   const ready = reviews.find((r) => r.status === "ready") ?? null;
   const running = latest?.status === "queued" || latest?.status === "running";
   const steps = Array.isArray(ready?.groups_json) ? ready.groups_json.length : 0;
+  const stale = ready !== null && isStale(ready, headSha);
 
   // Set when this tab asked for the run; cleared once its result has opened.
   const started = useRef(false);
@@ -100,12 +111,17 @@ export function GuidedReview({
       {latest?.status === "failed" && (
         <p className="mb-2 text-xs text-destructive text-pretty">{latest.error}</p>
       )}
+      {stale && !running && (
+        <p className="mb-2 text-xs text-status-warning text-pretty">
+          New commits since this review ({ready.head_sha!.slice(0, 7)} → {headSha!.slice(0, 7)}). It
+          still reads; regenerate when you want the new changes folded in.
+        </p>
+      )}
       {running && (
         <div className="mb-2 flex items-center gap-2 text-xs text-muted-foreground">
           <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
           <span className="text-pretty">
-            Classifying the files and writing the walkthrough with {latest.model}. The review opens
-            when it is ready.
+            {reviewPhaseText(latest.phase)} with {latest.model}. The review opens when it is ready.
           </span>
         </div>
       )}
@@ -120,7 +136,7 @@ export function GuidedReview({
         )}
         <Button
           size="xs"
-          variant={ready ? "ghost" : "default"}
+          variant={ready && !stale ? "ghost" : "default"}
           onClick={start}
           disabled={busy || running || !hasDefault}
         >

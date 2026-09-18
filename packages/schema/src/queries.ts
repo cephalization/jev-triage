@@ -115,9 +115,21 @@ export const queries = defineQueries({
           g
             .orderBy("created_at", "desc")
             .limit(3)
-            .related("files", (f) => f.orderBy("path", "asc")),
+            .related("files", (f) => f.orderBy("path", "asc"))
+            .related("creator"),
         )
         .related("reviewProgress", (p) => p.related("user")),
+    ),
+    /** Who generated what, and what it cost: the audit and spend list under System. */
+    byRepo: defineQuery(
+      z.object({ repoId: z.string(), limit: z.number().int().default(200) }),
+      ({ args }) =>
+        zql.guided_review
+          .where("repo_id", args.repoId)
+          .orderBy("created_at", "desc")
+          .limit(args.limit)
+          .related("creator")
+          .related("pull"),
     ),
   },
   reviewers: {

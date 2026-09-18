@@ -251,6 +251,7 @@ export function PullPanel({
 
         <GuidedReview
           pullId={pull.id}
+          headSha={pull.head_sha ?? null}
           reviews={pull.guidedReviews}
           hasDefault={hasReviewDefault}
           session={session}

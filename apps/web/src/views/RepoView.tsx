@@ -4,6 +4,7 @@ import { useIssueRows, usePullRows, useUserMap } from "../lib/data.ts";
 import { rootRoute } from "../router.tsx";
 
 export function RepoView() {
+  const { session } = rootRoute.useRouteContext();
   const { repo: repoId = null } = rootRoute.useSearch();
   const users = useUserMap();
   const { rows } = useIssueRows(repoId, { state: "open", search: "" });
@@ -12,7 +13,14 @@ export function RepoView() {
     <>
       <ViewHeader title="Repo" />
       <section className="min-w-0 flex-1 overflow-auto">
-        <RepoPanel rows={rows} pullRows={pullRows} reviewers={reviewers} users={users} />
+        <RepoPanel
+          rows={rows}
+          pullRows={pullRows}
+          reviewers={reviewers}
+          users={users}
+          repoId={repoId}
+          session={session}
+        />
       </section>
     </>
   );

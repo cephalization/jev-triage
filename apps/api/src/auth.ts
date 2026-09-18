@@ -2,6 +2,7 @@ import type { Role, ZeroContext } from "@triage/schema";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { jwtVerify, SignJWT } from "jose";
 import { env } from "./env.ts";
+import { isRevoked } from "./revoked.ts";
 
 const key = new TextEncoder().encode(env.authSecret);
 
@@ -63,7 +64,9 @@ export async function verifyToken(token: string): Promise<ZeroContext | undefine
 export async function contextFromRequest(req: Request): Promise<ZeroContext | undefined> {
   const h = req.headers.get("authorization");
   if (!h?.toLowerCase().startsWith("bearer ")) return undefined;
-  return verifyToken(h.slice(7).trim());
+  const ctx = await verifyToken(h.slice(7).trim());
+  if (ctx && (await isRevoked(ctx.userID))) return undefined;
+  return ctx;
 }
 
 // ---- OAuth state ----------------------------------------------------------
