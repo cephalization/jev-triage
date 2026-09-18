@@ -1,9 +1,10 @@
 import { createServer, type Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, test } from "vite-plus/test";
 import { baseFor, completeWithPi, modelFor } from "../src/pi.ts";
-import { runReview } from "../src/review.ts";
+import { Tracer } from "@triage/triage/trace";
+import { runNarrative } from "../src/review.ts";
 
-const GROUPS = '{"groups":[{"name":"Core","summary":"Adds the widget.","files":["src/a.ts"]}]}';
+const GROUPS = '{"summary":"Adds the widget.","impact":"","findings":[]}';
 
 /**
  * A fake provider speaking the two streaming shapes the SDK uses here: Anthropic messages
@@ -95,15 +96,17 @@ describe("pi runner", () => {
       { kind: "openai-compatible", baseUrl: "http://proxy/v1", apiKey: "k" },
       "my-model",
     );
-    expect(m.id).toBe("my-model");
-    expect(m.api).toBe("openai-completions");
-    expect(m.baseUrl).toBe("http://proxy/v1");
+    expect(m.model.id).toBe("my-model");
+    expect(m.model.api).toBe("openai-completions");
+    expect(m.model.baseUrl).toBe("http://proxy/v1");
+    expect(m.priced).toBe(false);
     const a = modelFor(
       { kind: "anthropic", baseUrl: "https://api.anthropic.com/v1", apiKey: "k" },
       "claude-sonnet-4-5",
     );
-    expect(a.api).toBe("anthropic-messages");
-    expect(a.baseUrl).toBe("https://api.anthropic.com");
+    expect(a.model.api).toBe("anthropic-messages");
+    expect(a.model.baseUrl).toBe("https://api.anthropic.com");
+    expect(a.priced).toBe(true);
   });
 
   test("anthropic shape: text and usage from the stream, key in x-api-key", async () => {
@@ -112,7 +115,8 @@ describe("pi runner", () => {
       "claude-sonnet-4-5",
       "hi",
     );
-    expect(c).toEqual({ text: "not json", inputTokens: 10, outputTokens: 5 });
+    expect(c).toMatchObject({ text: "not json", inputTokens: 10, outputTokens: 5, priced: true });
+    expect(c.costUsd).toBeGreaterThan(0);
     expect(hits.at(-1)).toBe("/v1/messages ka");
   });
 
@@ -122,25 +126,46 @@ describe("pi runner", () => {
       "any-model",
       "hi",
     );
-    expect(c).toEqual({ text: "not json", inputTokens: 7, outputTokens: 3 });
+    expect(c).toMatchObject({
+      text: "not json",
+      inputTokens: 7,
+      outputTokens: 3,
+      priced: false,
+      costUsd: 0,
+    });
     expect(hits.at(-1)).toBe("/v1/chat/completions Bearer kb");
   });
 
-  test("runReview retries once and returns normalised groups with summed usage", async () => {
-    const out = await runReview({
-      provider: { kind: "anthropic", baseUrl: base, apiKey: "ka" },
-      model: "claude-sonnet-4-5",
-      request: {
-        patch:
-          "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n",
-        intent: { title: "t", body: "", author: "a", headRef: "h", baseRef: "b" },
-        previousGroups: null,
+  test("runNarrative retries once and returns a validated narrative with summed usage", async () => {
+    const snapshot = {
+      list: async () => [],
+      read: async () => null,
+      grep: async () => [],
+    };
+    const out = await runNarrative(
+      {
+        provider: { kind: "anthropic", baseUrl: base, apiKey: "ka" },
+        model: "claude-sonnet-4-5",
+        callback: null,
+        repo: "o/r",
+        snapshot: { owner: "o", repo: "r", sha: "abc" },
+        trace: null,
+        request: {
+          intent: { title: "t", body: "", author: "a", headRef: "h", baseRef: "b" },
+          step: { name: "Core", intent: "the widget" },
+          index: 0,
+          allSteps: [{ name: "Core", intent: "the widget" }],
+          patch:
+            "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n",
+          classification: null,
+        },
       },
-    });
-    expect(out.groups).toEqual([
-      { name: "Core", summary: "Adds the widget.", files: ["src/a.ts"] },
-    ]);
+      { snapshot, callback: null, repo: "o/r", tracer: Tracer.off() },
+    );
+    expect(out.result.summary).toBe("Adds the widget.");
+    expect(out.result.findings).toEqual([]);
     expect(out.inputTokens).toBe(20);
     expect(out.outputTokens).toBe(10);
+    expect(out.priced).toBe(true);
   });
 });

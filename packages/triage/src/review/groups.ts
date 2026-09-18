@@ -1,50 +1,42 @@
 import { z } from "zod";
 
-/** One step of a guided review: what it does, why, and which files carry it. */
+/** A concrete observation a senior reviewer would raise, anchored to the code. */
+export const findingSchema = z.object({
+  severity: z.enum(["blocker", "concern", "note"]),
+  text: z.string().min(1).max(600),
+});
+export type Finding = z.infer<typeof findingSchema>;
+
+/**
+ * One step of a guided review: what it does and how, what else it touches, what a reviewer
+ * should raise, and which files carry it.
+ */
 export const reviewGroupSchema = z.object({
   name: z.string().min(1).max(120),
   summary: z.string().min(1).max(2000),
   files: z.array(z.string().min(1)).min(1),
+  impact: z.string().max(1500).optional(),
+  findings: z.array(findingSchema).max(8).optional(),
 });
 export type ReviewGroup = z.infer<typeof reviewGroupSchema>;
 
-export const reviewResultSchema = z.object({ groups: z.array(reviewGroupSchema).min(1) });
-export type ReviewResult = z.infer<typeof reviewResultSchema>;
-
-/** The first JSON object in a model's reply, fences and prose stripped, validated. */
-export function extractReviewResult(output: string): ReviewResult {
-  let text = output.trim();
-  const fenced = /^```(?:json)?\n([\s\S]*?)\n```$/.exec(text);
-  if (fenced?.[1] !== undefined) text = fenced[1];
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) throw new Error("response contained no JSON object");
-  return reviewResultSchema.parse(JSON.parse(text.slice(start, end + 1)));
-}
-
 /**
- * Repair a grouping against the real file list: unknown paths are dropped, a file keeps its
- * first assignment, and anything the model missed is swept into a final step rather than
- * failing the review.
+ * Every changed file in exactly one step, or the review is wrong. Assignment builds groups
+ * this way by construction; this is the check that a bug upstream fails loudly instead of
+ * being papered over.
  */
-export function normalizeGroups(
-  groups: readonly ReviewGroup[],
-  changedFiles: readonly string[],
-): ReviewGroup[] {
-  const known = new Set(changedFiles);
-  const assigned = new Set<string>();
-  const out: ReviewGroup[] = [];
-  for (const g of groups) {
-    const files = g.files.filter((f) => known.has(f) && !assigned.has(f));
-    for (const f of files) assigned.add(f);
-    if (files.length > 0) out.push({ ...g, files });
-  }
-  const missed = changedFiles.filter((f) => !assigned.has(f));
-  if (missed.length > 0)
-    out.push({
-      name: "Everything else",
-      summary: "Changed files the review did not place in a step.",
-      files: missed,
-    });
-  return out;
+export function assertCoversAll(groups: readonly ReviewGroup[], changedFiles: readonly string[]) {
+  const seen = new Map<string, string>();
+  for (const g of groups)
+    for (const f of g.files) {
+      const other = seen.get(f);
+      if (other !== undefined && other !== g.name)
+        throw new Error(`file ${f} is in two steps: "${other}" and "${g.name}"`);
+      seen.set(f, g.name);
+    }
+  const missing = changedFiles.filter((f) => !seen.has(f));
+  if (missing.length > 0) throw new Error(`files not placed in any step: ${missing.join(", ")}`);
+  const unknown = [...seen.keys()].filter((f) => !changedFiles.includes(f));
+  if (unknown.length > 0)
+    throw new Error(`steps name files not in the diff: ${unknown.join(", ")}`);
 }

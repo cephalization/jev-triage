@@ -23,7 +23,20 @@ export const stepSkeletonSchema = z.object({
 export type StepSkeleton = z.infer<typeof stepSkeletonSchema>;
 export const skeletonSchema = z.object({ steps: z.array(stepSkeletonSchema).min(1).max(10) });
 
-export const narrativeSchema = z.object({ summary: z.string().min(1).max(2000) });
+export const narrativeSchema = z.object({
+  summary: z.string().min(1).max(2000),
+  impact: z.string().max(1500).default(""),
+  findings: z
+    .array(
+      z.object({
+        severity: z.enum(["blocker", "concern", "note"]),
+        text: z.string().min(1).max(600),
+      }),
+    )
+    .max(8)
+    .default([]),
+});
+export type Narrative = z.infer<typeof narrativeSchema>;
 
 /** The first JSON object in a reply, fences and prose stripped. */
 export function extractJson<T>(output: string, schema: z.ZodType<T>): T {
@@ -127,19 +140,23 @@ export const NARRATIVE_BODY_BUDGET = 80_000;
 export function buildNarrativePrompt(req: NarrativeRequest, previousError: string | null): string {
   const rendered = renderPatch(req.files.map((f) => f.text).join(""), NARRATIVE_BODY_BUDGET);
   const sections = [
-    `You are writing one step of a GUIDED code review. You are the reviewer's senior colleague explaining how this part of the change works and why, not a changelog generator.
+    `You are reviewing one step of a pull request as a senior engineer, for a colleague who has NOT opened the diff. Your job is to do the review, not to tell them where to look. Telling the reader to "read this first" or "check X" is a failure; say what you found.
 
-Rules:
-- Write 3 to 5 sentences for a reviewer who has NOT opened the diff. Explain the change first: the problem this step solves, how the new code works (the mechanism: the new state, contract, data flow or algorithm, and how the pieces connect) and why this approach. Only then say what to scrutinize: the invariant that must hold, the edge case that could break, the decision worth questioning. A summary that is only directions ("review X", "check Y") is a failure. Do not narrate the diff line by line.
-- ${STE_RULES}
-- Stay inside this step; the other steps are listed so you can refer to them by name without repeating them.
-- Never invent what an omitted body contains; reason from its path, status, counts and the intent.${
+Write three parts:
+1. "summary", 3 to 6 sentences: what this step changes and how it works. Name the mechanism: the new state, contract, data flow or algorithm, and how the pieces connect. Say why this approach, and what behaviour changes for callers or users. Do not narrate the diff line by line.
+2. "impact", 1 to 3 sentences: what else this touches. Which callers, contracts, data, configuration or tests depend on what changed, and whether they were updated. Say "nothing outside this step" when that is true.${
       req.tools
-        ? "\n- You can read the repository at this pull request's head with the tools (list_files, read_file, grep, rank_files) when the diff alone does not show what a caller or a type expects. Use rank_files to pick the few files worth reading."
+        ? " Use grep to find the callers and definitions of changed symbols and read_file to see how they use them; report what you found, not what you assume. rank_files picks the few files worth reading when grep returns many."
         : ""
     }
+3. "findings", 0 to 6 items, most important first: the concrete observations you would leave as review comments. A bug, a missing case, an invariant that can break, a contract that changed without its callers, a missing or weak test, a name or an API that will mislead. Each names the file and the symbol or line it is about, and says why it matters. severity "blocker" for what must change before merge, "concern" for what deserves a reply, "note" for what the author should know. An empty list is fine when the step is clean; say so in the summary.
+
+Rules:
+- ${STE_RULES}
+- Stay inside this step; the other steps are listed so you can refer to them by name without repeating them.
+- Never invent what an omitted body contains; reason from its path, status, counts and the intent.
 - Respond with ONLY this JSON shape, no prose and no code fences:
-  {"summary":"..."}`,
+  {"summary":"...","impact":"...","findings":[{"severity":"concern","text":"..."}]}`,
     `<intent>\n${renderIntent(req.intent)}\n</intent>`,
     `<steps>\n${req.allSteps.map((s, i) => `${i + 1}. ${s.name}${i === req.index ? " (this step)" : ""}: ${s.intent}`).join("\n")}\n</steps>`,
     `<step>\n${req.index + 1}. ${req.step.name}\n${req.step.intent}\n</step>`,

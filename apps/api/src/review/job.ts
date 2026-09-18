@@ -1,36 +1,22 @@
 import type { SystemOne } from "@triage/triage";
-import {
-  generateReview,
-  groupSeed,
-  normalizeGroups,
-  splitPatch,
-  type ClassifiedFile,
-  type ReviewGroup,
-  type ReviewIntent,
-} from "@triage/triage/review";
-import { sql } from "../db.ts";
+import { splitPatch, type ReviewGroup, type ReviewIntent } from "@triage/triage/review";
+import { OI, Tracer } from "@triage/triage/trace";
+import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 import { makeOctokit } from "../github/sync.ts";
 import { resolveProvider } from "../providers/store.ts";
-import { cellReachable, runInCell } from "./cell.ts";
+import { cellReachable, loadSnapshotInCell, type Cell } from "./cell.ts";
 import { classifyFiles, storeFileRows } from "./files.ts";
-import { complete, type Ask, type RunnerProvider } from "./runner.ts";
-import {
-  cellAgent,
-  generateStaged,
-  inProcessAgent,
-  loadSnapshotInCell,
-  type Phase,
-} from "./stages.ts";
+import { cellAgent, generateStaged, type Phase } from "./stages.ts";
+import type { CallUsage } from "./usage.ts";
 
 /**
  * One guided-review generation, from a queued row to ready or failed. Progress streams
  * through the row (status, phase, and the skeleton before its narratives) so every viewer
  * watches the same run. One run per pull request at a time.
  *
- * With jev available the staged pipeline runs (snapshot and classification in parallel, a
- * short skeleton call, jev assignment, narratives in parallel, unchanged steps kept). Without
- * it the single-shot prompt runs, and if that fails the file classification alone is served.
+ * A review needs jev and the reviewer cell. If either is missing or any stage fails, the row
+ * is failed with the reason; nothing degraded is ever served as a review.
  */
 
 const BODY_CHARS = 4000;
@@ -39,45 +25,6 @@ export interface PullSnapshot {
   headSha: string;
   intent: ReviewIntent;
   diff: string;
-}
-
-export interface Generated {
-  groups: ReviewGroup[];
-  files: string[];
-  inputTokens: number;
-  outputTokens: number;
-}
-
-/** The single-shot core: snapshot in, groups out, with the retry and the normalisation applied. */
-export async function generate(
-  snapshot: PullSnapshot,
-  previousGroups: readonly ReviewGroup[] | null,
-  ask: Ask,
-  classification: string | null = null,
-): Promise<Generated> {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  const result = await generateReview(
-    { patch: snapshot.diff, intent: snapshot.intent, previousGroups, classification },
-    async (prompt) => {
-      const c = await ask(prompt);
-      inputTokens += c.inputTokens;
-      outputTokens += c.outputTokens;
-      return c.text;
-    },
-  );
-  const files = splitPatch(snapshot.diff).map((f) => f.path);
-  return { groups: normalizeGroups(result.groups, files), files, inputTokens, outputTokens };
-}
-
-/** The review served when the agent fails: jev's order with generic step titles. */
-export function seedReview(classified: readonly ClassifiedFile[], allFiles: string[]): Generated {
-  return {
-    groups: normalizeGroups(groupSeed(classified), allFiles),
-    files: allFiles,
-    inputTokens: 0,
-    outputTokens: 0,
-  };
 }
 
 /** The pull request as GitHub has it right now: metadata for intent, and its unified diff. */
@@ -116,30 +63,83 @@ export function isGenerating(pullId: string): boolean {
   return inFlight.has(pullId);
 }
 
+/** Why generation cannot start, or null when it can. Checked by the route before queueing. */
+export async function generationBlocker(systemOne: SystemOne | null): Promise<string | null> {
+  if (!systemOne) return "TYPESAFE_API_KEY is not set; guided reviews need the classifier";
+  if (!env.reviewCellUrl)
+    return "no reviewer cell: install celld and start with `vp run dev`, or set REVIEW_CELL_URL";
+  if (!(await cellReachable({ url: env.reviewCellUrl })))
+    return `the reviewer cell at ${env.reviewCellUrl} is not answering`;
+  return null;
+}
+
 interface ReviewRow {
   id: string;
   pull_id: string;
   repo_id: string;
   provider_id: string | null;
   model: string;
+  created_by: string | null;
+}
+
+interface CostInsert extends CallUsage {
+  stage: "skeleton" | "narrative";
+}
+
+/** One row per provider call: who is charged (the key's owner now) and who asked. */
+async function storeCosts(
+  row: ReviewRow,
+  provider: { kind: string; keySetBy: string | null },
+  calls: readonly CostInsert[],
+): Promise<{ costUsd: number; priced: boolean }> {
+  let costUsd = 0;
+  let priced = true;
+  const rows = calls.map((c) => {
+    costUsd += c.costUsd;
+    priced &&= c.priced;
+    return {
+      id: newId(),
+      repo_id: row.repo_id,
+      review_id: row.id,
+      provider_id: row.provider_id,
+      provider_kind: provider.kind,
+      model: row.model,
+      key_owner: provider.keySetBy,
+      requested_by: row.created_by,
+      stage: c.stage,
+      input_tokens: c.inputTokens,
+      output_tokens: c.outputTokens,
+      cache_read_tokens: c.cacheReadTokens,
+      cache_write_tokens: c.cacheWriteTokens,
+      cost_usd: c.costUsd,
+      priced: c.priced,
+    };
+  });
+  if (rows.length > 0) await sql`insert into llm_cost ${sql(rows)}`;
+  return { costUsd, priced };
 }
 
 export interface JobDeps {
-  /** The classifier for the file pass; null skips it (no TypeSafe key). */
   systemOne: SystemOne | null;
   fetchSnapshot?: typeof fetchPullSnapshot;
-  provider?: (id: string) => Promise<RunnerProvider | null>;
-  complete?: typeof complete;
+  provider?: typeof resolveProvider;
 }
 
 /** Drive one queued review row to completion. Errors land on the row, never thrown. */
 export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<void> {
   const [row] = await sql<ReviewRow[]>`
-    select id, pull_id, repo_id, provider_id, model from guided_review where id = ${reviewId}`;
+    select id, pull_id, repo_id, provider_id, model, created_by from guided_review where id = ${reviewId}`;
   if (!row) return;
   if (inFlight.has(row.pull_id)) return;
   inFlight.add(row.pull_id);
   const t0 = Date.now();
+  const tracer = new Tracer(env.phoenixEndpoint, env.phoenixProject, "typeful-api");
+  const root = tracer.start("guided_review", "AGENT", null, {
+    [OI.sessionId]: row.id,
+    [OI.userId]: row.created_by ?? "",
+    [OI.inputValue]: `${row.repo_id} review ${row.id}`,
+    [OI.metadata]: JSON.stringify({ repo: row.repo_id, pull: row.pull_id, model: row.model }),
+  });
   const setPhase = async (phase: Phase | null, groups: ReviewGroup[] | null) => {
     if (groups)
       await sql`update guided_review set phase = ${phase}, groups_json = ${sql.json(groups)} where id = ${row.id}`;
@@ -147,6 +147,11 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
   };
   try {
     await sql`update guided_review set status = 'running', started_at = now(), phase = null where id = ${row.id}`;
+    const blocker = await generationBlocker(deps.systemOne);
+    if (blocker) throw new Error(blocker);
+    const systemOne = deps.systemOne!;
+    const cell: Cell = { url: env.reviewCellUrl!, token: env.reviewCellToken };
+
     const [pull] = await sql<
       { number: number }[]
     >`select number from pull where id = ${row.pull_id}`;
@@ -155,26 +160,15 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
     const provider = await (deps.provider ?? resolveProvider)(row.provider_id);
     if (!provider) throw new Error("the provider has no key; set one in System → Providers");
     const snapshot = await (deps.fetchSnapshot ?? fetchPullSnapshot)(row.repo_id, pull.number);
-    const patchFiles = splitPatch(snapshot.diff);
-    const allFiles = patchFiles.map((f) => f.path);
+    const allFiles = splitPatch(snapshot.diff).map((f) => f.path);
     // The patch is stored now so the review screen can show diffs under the skeleton.
     await sql`insert into private.review_patch (review_id, patch) values (${row.id}, ${snapshot.diff})
       on conflict (review_id) do update set patch = excluded.patch`;
-    const ask: Ask = (prompt) => (deps.complete ?? complete)(provider, row.model, prompt);
 
-    // A configured cell that is not answering (it crashed, or celld is not running) must not
-    // cost the review: fall back to the in-process runner and say so.
-    const cellUrl = env.reviewCellUrl;
-    const useCell = cellUrl !== null && (await cellReachable({ url: cellUrl }));
-    if (cellUrl && !useCell)
-      console.warn(
-        `[review] ${row.id}: reviewer cell at ${cellUrl} is not answering; running in-process`,
-      );
-    const cell = useCell ? { url: cellUrl, token: env.reviewCellToken } : null;
-
+    // Only a review the model wrote is worth keeping steps from.
     const [prev] = await sql<{ id: string; groups_json: ReviewGroup[] }[]>`
       select id, groups_json from guided_review
-      where pull_id = ${row.pull_id} and status = 'ready' and id <> ${row.id}
+      where pull_id = ${row.pull_id} and status = 'ready' and source = 'agent' and id <> ${row.id}
       order by created_at desc limit 1`;
     const [prevPatch] = prev
       ? await sql<
@@ -182,128 +176,66 @@ export async function runReviewJob(reviewId: string, deps: JobDeps): Promise<voi
         >`select patch from private.review_patch where review_id = ${prev.id}`
       : [];
 
-    let out: Generated & { toolCalls: number; reusedSteps: number };
-    let source = "agent";
-    let agentError: string | null = null;
-    let classified: ClassifiedFile[] = [];
-    const systemOne = deps.systemOne;
-    if (systemOne) {
-      try {
-        const staged = await generateStaged({
-          reviewId: row.id,
-          repoId: row.repo_id,
-          intent: snapshot.intent,
-          headSha: snapshot.headSha,
-          patch: snapshot.diff,
-          previous: prev && prevPatch ? { groups: prev.groups_json, patch: prevPatch.patch } : null,
-          systemOne,
-          loadSnapshot: () =>
-            cell
-              ? loadSnapshotInCell(cell, row.repo_id, snapshot.headSha, {
-                  token: env.githubToken,
-                  apiBase: env.githubSyncApiUrl,
-                })
-              : Promise.resolve(null),
-          agent: (snap) =>
-            cell
-              ? cellAgent(
-                  cell,
-                  row.id,
-                  row.repo_id,
-                  provider,
-                  row.model,
-                  `http://127.0.0.1:${env.port}`,
-                  snap,
-                )
-              : inProcessAgent(ask),
-          classify: async (intent, files) => {
-            const c = await classifyFiles(systemOne, row.repo_id, intent, files);
-            await storeFileRows(row.id, c);
-            return c;
-          },
-          onPhase: setPhase,
-        });
-        classified = staged.classified;
-        out = {
-          groups: normalizeGroups(staged.groups, allFiles),
-          files: allFiles,
-          inputTokens: staged.inputTokens,
-          outputTokens: staged.outputTokens,
-          toolCalls: staged.toolCalls,
-          reusedSteps: staged.reusedSteps,
-        };
-      } catch (e) {
-        agentError = e instanceof Error ? e.message : String(e);
-        // Whatever jev classified before the failure still makes a review.
-        const rows = await sql<
-          { n: number }[]
-        >`select count(*)::int as n from guided_review_file where review_id = ${row.id}`;
-        if (rows[0]?.n === 0) throw e;
-        const stored = await sql<
-          {
-            path: string;
-            status: string;
-            added: number;
-            removed: number;
-            role: string;
-            risk: number | null;
-            attention: number | null;
-            entry: number | null;
-            role_confidence: number | null;
-          }[]
-        >`select path, status, added, removed, role, risk, attention, entry, role_confidence from guided_review_file where review_id = ${row.id}`;
-        classified = stored.map((r) => ({
-          path: r.path,
-          status: r.status as ClassifiedFile["status"],
-          added: r.added,
-          removed: r.removed,
-          signal: {
-            role: r.role as ClassifiedFile["signal"]["role"],
-            roleConfidence: r.role_confidence,
-            risk: r.risk,
-            attention: r.attention,
-            entry: r.entry,
-            probabilities: {},
-          },
-        }));
-        console.warn(
-          `[review] ${row.id}: agent failed, serving the classified order: ${agentError}`,
-        );
-        out = { ...seedReview(classified, allFiles), toolCalls: 0, reusedSteps: 0 };
-        source = "seed";
-      }
-    } else {
-      // No jev: the single-shot prompt, through the cell or in-process.
-      const previousGroups = prev?.groups_json ?? null;
-      const single = cell
-        ? await runInCell(cell, row.id, {
-            provider,
-            model: row.model,
-            request: { patch: snapshot.diff, intent: snapshot.intent, previousGroups },
-          })
-        : await generate(snapshot, previousGroups, ask, null);
-      out = { ...single, toolCalls: 0, reusedSteps: 0 };
-    }
+    const staged = await generateStaged({
+      reviewId: row.id,
+      repoId: row.repo_id,
+      intent: snapshot.intent,
+      headSha: snapshot.headSha,
+      patch: snapshot.diff,
+      previous: prev && prevPatch ? { groups: prev.groups_json, patch: prevPatch.patch } : null,
+      systemOne,
+      loadSnapshot: () =>
+        loadSnapshotInCell(cell, row.repo_id, snapshot.headSha, {
+          token: env.githubToken,
+          apiBase: env.githubSyncApiUrl,
+        }),
+      agent: (snap) =>
+        cellAgent(
+          cell,
+          row.id,
+          row.repo_id,
+          provider,
+          row.model,
+          `http://127.0.0.1:${env.port}`,
+          snap,
+          tracer,
+        ),
+      classify: async (intent, files, trace) => {
+        const c = await classifyFiles(systemOne, row.repo_id, intent, files, trace);
+        await storeFileRows(row.id, c);
+        return c;
+      },
+      onPhase: setPhase,
+      tracer,
+      root,
+    });
+    const spend = await storeCosts(row, provider, staged.calls);
 
-    await sql.begin(async (tx) => {
-      await tx`update guided_review set status = 'ready', phase = null, head_sha = ${snapshot.headSha},
-        groups_json = ${sql.json(out.groups)}, file_count = ${out.files.length},
-        input_tokens = ${out.inputTokens}, output_tokens = ${out.outputTokens},
-        tool_calls = ${out.toolCalls}, reused_steps = ${out.reusedSteps},
-        source = ${source}, error = ${agentError === null ? null : agentError.slice(0, 500)},
-        finished_at = now() where id = ${row.id}`;
-      await tx`insert into private.review_patch (review_id, patch) values (${row.id}, ${snapshot.diff})
-        on conflict (review_id) do update set patch = excluded.patch`;
+    await sql`update guided_review set status = 'ready', phase = null, head_sha = ${snapshot.headSha},
+      groups_json = ${sql.json(staged.groups)}, file_count = ${allFiles.length},
+      input_tokens = ${staged.inputTokens}, output_tokens = ${staged.outputTokens},
+      tool_calls = ${staged.toolCalls}, reused_steps = ${staged.reusedSteps},
+      cost_usd = ${spend.costUsd}, priced = ${spend.priced},
+      source = 'agent', error = null, finished_at = now() where id = ${row.id}`;
+    tracer.end(root, {
+      [OI.outputValue]: staged.groups.map((g) => g.name).join(" → "),
+      [OI.promptTokens]: staged.inputTokens,
+      [OI.completionTokens]: staged.outputTokens,
+      [OI.costTotal]: spend.costUsd,
+      "review.tool_calls": staged.toolCalls,
+      "review.reused_steps": staged.reusedSteps,
     });
     console.log(
-      `[review] ${row.repo_id}#${pull.number}: ${out.groups.length} steps over ${out.files.length} files (${classified.length} classified, ${out.reusedSteps} kept), ${out.inputTokens} in / ${out.outputTokens} out, ${out.toolCalls} tool calls, ${Date.now() - t0} ms, ${row.model}${useCell ? " (cell)" : ""}${source === "seed" ? " (seed)" : ""}`,
+      `[review] ${row.repo_id}#${pull.number}: ${staged.groups.length} steps over ${allFiles.length} files (${staged.reusedSteps} kept), ${staged.inputTokens} in / ${staged.outputTokens} out, ${staged.toolCalls} tool calls, ${spend.priced ? `$${spend.costUsd.toFixed(4)}` : "unpriced"}, ${Date.now() - t0} ms, ${row.model}`,
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn(`[review] ${row.id} failed: ${message}`);
+    if (root.end === null) tracer.end(root, {}, e);
     await sql`update guided_review set status = 'failed', phase = null, error = ${message.slice(0, 500)}, finished_at = now() where id = ${row.id}`;
   } finally {
     inFlight.delete(row.pull_id);
+    await tracer.flush();
   }
 }
 

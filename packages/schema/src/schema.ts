@@ -130,6 +130,8 @@ const provider = table("provider")
     label: string(),
     base_url: string(),
     key_hint: string().optional(),
+    /** Who set the key; the owner every cost row is charged to. */
+    key_set_by: string().optional(),
     models_json: json<ProviderModel[]>(),
     created_by: string().optional(),
     created_at: number(),
@@ -224,7 +226,13 @@ const pull = table("pull")
   })
   .primaryKey("id");
 
-export type ReviewGroupJson = { name: string; summary: string; files: string[] };
+export type ReviewGroupJson = {
+  name: string;
+  summary: string;
+  files: string[];
+  impact?: string;
+  findings?: { severity: "blocker" | "concern" | "note"; text: string }[];
+};
 
 /** One generated walkthrough of a pull request; the patch it used stays server-side. */
 const guidedReview = table("guided_review")
@@ -251,6 +259,31 @@ const guidedReview = table("guided_review")
     phase: string().optional(),
     tool_calls: number(),
     reused_steps: number(),
+    /** Provider spend for this generation, from pi's catalog; priced=false means unknown. */
+    cost_usd: number(),
+    priced: boolean(),
+  })
+  .primaryKey("id");
+
+/** One agent call at the provider: tokens, money, and who is charged. */
+const llmCost = table("llm_cost")
+  .columns({
+    id: string(),
+    repo_id: string(),
+    review_id: string().optional(),
+    provider_id: string().optional(),
+    provider_kind: string(),
+    model: string(),
+    key_owner: string().optional(),
+    requested_by: string().optional(),
+    stage: string(),
+    input_tokens: number(),
+    output_tokens: number(),
+    cache_read_tokens: number(),
+    cache_write_tokens: number(),
+    cost_usd: number(),
+    priced: boolean(),
+    created_at: number(),
   })
   .primaryKey("id");
 
@@ -440,6 +473,12 @@ const guidedReviewRelationships = relationships(guidedReview, ({ many, one }) =>
   files: many({ sourceField: ["id"], destSchema: guidedReviewFile, destField: ["review_id"] }),
 }));
 
+const llmCostRelationships = relationships(llmCost, ({ one }) => ({
+  provider: one({ sourceField: ["provider_id"], destSchema: provider, destField: ["id"] }),
+  keyOwner: one({ sourceField: ["key_owner"], destSchema: user, destField: ["id"] }),
+  requester: one({ sourceField: ["requested_by"], destSchema: user, destField: ["id"] }),
+}));
+
 const reviewProgressRelationships = relationships(reviewProgress, ({ one }) => ({
   user: one({ sourceField: ["user_id"], destSchema: user, destField: ["id"] }),
 }));
@@ -473,6 +512,7 @@ export const schema = createSchema({
     guidedReview,
     guidedReviewFile,
     reviewProgress,
+    llmCost,
     reviewer,
     run,
     classification,
@@ -488,6 +528,7 @@ export const schema = createSchema({
     pullRelationships,
     guidedReviewRelationships,
     reviewProgressRelationships,
+    llmCostRelationships,
     feedbackRelationships,
     classificationRelationships,
     presenceRelationships,

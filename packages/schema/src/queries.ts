@@ -132,6 +132,20 @@ export const queries = defineQueries({
           .related("pull"),
     ),
   },
+  llmCosts: {
+    /** Provider spend rows for the cost screen; the client buckets them by day and dimension. */
+    byRepo: defineQuery(
+      z.object({ repoId: z.string(), since: z.number(), limit: z.number().int().default(5000) }),
+      ({ args }) =>
+        zql.llm_cost
+          .where("repo_id", args.repoId)
+          .where("created_at", ">=", args.since)
+          .orderBy("created_at", "desc")
+          .limit(args.limit)
+          .related("provider")
+          .related("keyOwner"),
+    ),
+  },
   reviewers: {
     byRepo: defineQuery(z.string(), ({ args: repoId }) =>
       zql.reviewer.where("repo_id", repoId).orderBy("reviews", "desc").orderBy("login", "asc"),

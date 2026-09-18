@@ -130,11 +130,22 @@ snapshot of the repository at the head while jev answers four questions per chan
 batch). The agent names the steps in one short call; jev assigns every file to a step in one
 request; the agent writes each step's text in parallel, reading the snapshot through
 `list_files`, `read_file`, `grep` and a jev-backed `rank_files`. Steps unchanged since the
-previous review are kept. Every stage streams through the row's `phase` and `groups_json`. Without
-a cell the same stages run in-process without tools; without jev the single-shot prompt runs; if
-the agent fails, jev's order is served as the review with `source = 'seed'`. The screen at
+previous review are kept. Every stage streams through the row's `phase` and `groups_json`. There
+is no degraded path: a review needs jev and the reviewer cell, generation is refused up front
+when either is missing, and any stage failing fails the review with its reason. The screen at
 `/pulls/$pullId/review` reads the row, its file rows and everyone's `review_progress` marks
 through Zero, and fetches the patch from `/api/reviews/:id/patch`.
+
+### Traces
+
+`packages/triage/src/trace.ts` is a small OpenInference tracer over OTLP/HTTP protobuf that
+runs in Node and in the cell with nothing but `fetch`. The API opens a root span per review
+(`session.id` is the review id, `user.id` the requester) and a child per stage; jev requests
+are LLM spans with their state and answers; the cell receives the parent's context in each
+stage request and adds an agent span per stage, an LLM span per model turn with messages,
+tokens and cost, and a tool span per call. The `rank_files` tool carries the context back so
+the reranker span sits under the tool call. Everything ships to `PHOENIX_COLLECTOR_ENDPOINT`;
+without it the tracer records nothing.
 
 ### Presence
 

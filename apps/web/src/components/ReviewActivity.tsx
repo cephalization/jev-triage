@@ -3,6 +3,7 @@ import { mutators, queries } from "@triage/schema";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { ago, compact } from "../lib/format.ts";
+import { money } from "./ReviewCost.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
@@ -82,11 +83,12 @@ export function ReviewActivity({
                 <span className="text-muted-foreground tabular-nums">#{r.pull?.number ?? "?"}</span>{" "}
                 {r.pull?.title ?? r.pull_id}
               </Link>
-              <Tag>
-                {r.status === "ready" ? (r.source === "seed" ? "seed" : r.model) : r.status}
-              </Tag>
+              <Tag>{r.status === "ready" ? r.model : r.status}</Tag>
               <span className="w-20 shrink-0 text-right text-muted-foreground tabular-nums">
                 {compact(r.input_tokens)} / {compact(r.output_tokens)}
+              </span>
+              <span className="w-14 shrink-0 text-right tabular-nums">
+                {r.status === "ready" ? (r.priced ? money(r.cost_usd) : "—") : ""}
               </span>
               <span className="w-16 shrink-0 text-right text-muted-foreground whitespace-nowrap">
                 {ago(r.created_at, now)}

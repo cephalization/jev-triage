@@ -1,13 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import {
-  runNarrative,
-  runReview,
-  runSkeleton,
-  type NarrativeBody,
-  type RunBody,
-  type RunResult,
-  type SkeletonBody,
-} from "./review.ts";
+import { runNarrative, runSkeleton, type NarrativeBody, type SkeletonBody } from "./review.ts";
+import { Tracer } from "@triage/triage/trace";
 import { snapshotClient, type SnapshotClient } from "./agent.ts";
 import { RepoSnapshot, type SnapshotStats } from "./snapshot.ts";
 
@@ -18,7 +11,6 @@ export { RepoSnapshot };
  *   POST /snapshots/{owner}/{repo}/{sha}   load the repository at that commit (once per head)
  *   POST /runs/{id}/skeleton               name the steps, with repository tools
  *   POST /runs/{id}/narrative              write one step, with repository tools (in parallel)
- *   POST /runs/{id}                        the single-shot review (fallback and tests)
  *   GET  /repos/{owner}/{repo}/stats       what this repository's cells hold, for the settings page
  * One ReviewRun cell per review, one RepoSnapshot per commit, one RepoIndex per repository.
  */
@@ -31,7 +23,7 @@ export interface Env {
   REVIEWER_TOKEN?: string;
 }
 
-const RUN = /^\/runs\/([A-Za-z0-9_-]{1,64})(?:\/(skeleton|narrative))?$/;
+const RUN = /^\/runs\/([A-Za-z0-9_-]{1,64})\/(skeleton|narrative)$/;
 const SNAPSHOT = /^\/snapshots\/([\w.-]+)\/([\w.-]+)\/([0-9a-f]{7,40})(?:\/(file|list|grep))?$/;
 const REPO = /^\/repos\/([\w.-]+)\/([\w.-]+)\/stats$/;
 
@@ -63,7 +55,6 @@ interface RunRecord {
   finishedAt: number | null;
   model: string;
   error: string | null;
-  result: RunResult | null;
   /** Calls this cell has served, for the repository's ledger. */
   calls: number;
   repo: string | null;
@@ -71,17 +62,17 @@ interface RunRecord {
 
 export class ReviewRun extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
-    const stage = RUN.exec(new URL(request.url).pathname)?.[2] ?? null;
+    const stage = RUN.exec(new URL(request.url).pathname)?.[2] as "skeleton" | "narrative";
     if (request.method === "GET") {
       const rec = await this.ctx.storage.get<RunRecord>("run");
       return rec ? Response.json(rec) : Response.json({ error: "no run" }, { status: 404 });
     }
     if (request.method !== "POST") return Response.json({ error: "method" }, { status: 405 });
-    let body: RunBody | SkeletonBody | NarrativeBody;
+    let body: SkeletonBody | NarrativeBody;
     try {
       body = (await request.json()) as typeof body;
-      if (!body?.provider?.apiKey || !body.model || !body.request)
-        throw new Error("provider, model and request are required");
+      if (!body?.provider?.apiKey || !body.model || !body.request || !body.snapshot || !body.repo)
+        throw new Error("provider, model, repo, snapshot and request are required");
     } catch (e) {
       return Response.json({ error: e instanceof Error ? e.message : "bad body" }, { status: 400 });
     }
@@ -91,7 +82,6 @@ export class ReviewRun extends DurableObject<Env> {
       finishedAt: null,
       model: body.model,
       error: null,
-      result: null,
       calls: 0,
       repo: null,
     };
@@ -100,29 +90,20 @@ export class ReviewRun extends DurableObject<Env> {
     // The key is never stored: only what is needed to answer a later GET.
     await this.ctx.storage.put("run", rec);
     try {
-      if (stage === "skeleton" || stage === "narrative") {
-        const staged = body as SkeletonBody | NarrativeBody;
-        const host = {
-          snapshot: this.#snapshot(staged),
-          callback: staged.callback,
-          repo: staged.repo,
-        };
-        const out =
-          stage === "skeleton"
-            ? await runSkeleton(staged as SkeletonBody, host)
-            : await runNarrative(staged as NarrativeBody, host);
-        await this.#report(rec);
-        return Response.json(out);
-      }
-      const result = await runReview(body as RunBody);
-      await this.ctx.storage.put("run", {
-        ...rec,
-        status: "ready",
-        finishedAt: Date.now(),
-        result,
-      });
+      const host = {
+        snapshot: this.#snapshot(body),
+        callback: body.callback,
+        repo: body.repo,
+        tracer: body.trace
+          ? new Tracer(body.trace.endpoint, body.trace.project, "typeful-reviewer")
+          : Tracer.off("typeful-reviewer"),
+      };
+      const out =
+        stage === "skeleton"
+          ? await runSkeleton(body as SkeletonBody, host)
+          : await runNarrative(body as NarrativeBody, host);
       await this.#report(rec);
-      return Response.json(result);
+      return Response.json(out);
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);
       await this.ctx.storage.put("run", {
@@ -135,10 +116,9 @@ export class ReviewRun extends DurableObject<Env> {
     }
   }
 
-  /** The snapshot the request names; tools are off without one. */
-  #snapshot(body: SkeletonBody | NarrativeBody): SnapshotClient | null {
+  /** The snapshot the request names; every stage reads the repository through it. */
+  #snapshot(body: SkeletonBody | NarrativeBody): SnapshotClient {
     const s = body.snapshot;
-    if (!s) return null;
     const id = this.env.REPO_SNAPSHOT.idFromName(`${s.owner}/${s.repo}@${s.sha}`);
     return snapshotClient(
       this.env.REPO_SNAPSHOT.get(id),

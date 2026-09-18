@@ -2,51 +2,17 @@ import {
   askJson,
   buildNarrativePrompt,
   buildSkeletonPrompt,
-  generateReview,
   narrativeSchema,
-  normalizeGroups,
   skeletonSchema,
   splitPatch,
+  type Narrative,
   type NarrativeRequest,
-  type ReviewGroup,
-  type ReviewRequest,
   type SkeletonRequest,
   type StepSkeleton,
 } from "@triage/triage/review";
+import { OI, type Span, type TraceContext } from "@triage/triage/trace";
 import { runAgent, type Callback, type ToolHost } from "./agent.ts";
-import { completeWithPi, type Completion, type ProviderSpec } from "./pi.ts";
-
-/** What the API sends a cell for the single-shot review: who to call, with what, about which change. */
-export interface RunBody {
-  provider: ProviderSpec;
-  model: string;
-  request: ReviewRequest;
-}
-
-export interface RunResult {
-  groups: ReviewGroup[];
-  files: string[];
-  inputTokens: number;
-  outputTokens: number;
-}
-
-/** Prompt, retry, validate and normalise: the same pipeline the API runs in-process. */
-export async function runReview(
-  body: RunBody,
-  ask: (prompt: string) => Promise<Completion> = (p) =>
-    completeWithPi(body.provider, body.model, p),
-): Promise<RunResult> {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  const result = await generateReview(body.request, async (prompt) => {
-    const c = await ask(prompt);
-    inputTokens += c.inputTokens;
-    outputTokens += c.outputTokens;
-    return c.text;
-  });
-  const files = splitPatch(body.request.patch).map((f) => f.path);
-  return { groups: normalizeGroups(result.groups, files), files, inputTokens, outputTokens };
-}
+import { addUsage, NO_USAGE, type CallUsage, type ProviderSpec } from "./pi.ts";
 
 /** The staged calls: the API sends the patch subset and the prompt inputs; the cell adds tools. */
 export interface StagedBody {
@@ -55,8 +21,10 @@ export interface StagedBody {
   callback: Callback | null;
   /** `owner/repo`, for the repository's ledger of cells. */
   repo: string;
-  /** The loaded snapshot the tools read; null runs without tools. */
-  snapshot: { owner: string; repo: string; sha: string } | null;
+  /** The loaded snapshot the tools read. */
+  snapshot: { owner: string; repo: string; sha: string };
+  /** Where this stage's spans go and which span they hang from; null sends nothing. */
+  trace: TraceContext | null;
 }
 
 export interface SkeletonBody extends StagedBody {
@@ -70,30 +38,48 @@ export interface NarrativeBody extends StagedBody {
   request: Omit<NarrativeRequest, "files" | "tools"> & { patch: string };
 }
 
-export interface StagedResult<T> {
+export interface StagedResult<T> extends CallUsage {
   result: T;
-  inputTokens: number;
-  outputTokens: number;
   toolCalls: number;
 }
 
 async function staged<T>(
+  name: string,
   body: StagedBody,
   host: ToolHost,
   build: (previousError: string | null) => string,
   schema: Parameters<typeof askJson<T>>[1],
+  input: string,
 ): Promise<StagedResult<T>> {
-  let inputTokens = 0;
-  let outputTokens = 0;
+  let usage: CallUsage = NO_USAGE;
   let toolCalls = 0;
-  const result = await askJson(build, schema, async (prompt) => {
-    const r = await runAgent(body.provider, body.model, prompt, host);
-    inputTokens += r.inputTokens;
-    outputTokens += r.outputTokens;
-    toolCalls += r.toolCalls;
-    return r.text;
+  const parent: Span | TraceContext | null = body.trace;
+  const span = host.tracer.start(name, "AGENT", parent, {
+    [OI.inputValue]: input,
+    [OI.modelName]: body.model,
   });
-  return { result, inputTokens, outputTokens, toolCalls };
+  try {
+    const result = await askJson(build, schema, async (prompt) => {
+      const r = await runAgent(body.provider, body.model, prompt, host, span);
+      usage = addUsage(usage, r);
+      toolCalls += r.toolCalls;
+      return r.text;
+    });
+    host.tracer.end(span, {
+      [OI.outputValue]: JSON.stringify(result),
+      [OI.outputMime]: "application/json",
+      [OI.promptTokens]: usage.inputTokens,
+      [OI.completionTokens]: usage.outputTokens,
+      [OI.costTotal]: usage.costUsd,
+      "review.tool_calls": toolCalls,
+    });
+    return { result, ...usage, toolCalls };
+  } catch (e) {
+    host.tracer.end(span, {}, e);
+    throw e;
+  } finally {
+    await host.tracer.flush();
+  }
 }
 
 export function runSkeleton(
@@ -104,19 +90,33 @@ export function runSkeleton(
     ...body.request,
     files: splitPatch(body.request.patch),
     skimPaths: new Set(body.request.skimPaths),
-    tools: host.snapshot !== null,
+    tools: true,
   };
-  return staged(body, host, (prev) => buildSkeletonPrompt(req, prev), skeletonSchema);
+  return staged(
+    "skeleton",
+    body,
+    host,
+    (prev) => buildSkeletonPrompt(req, prev),
+    skeletonSchema,
+    `${req.intent.title} (${req.files.length} files)`,
+  );
 }
 
 export function runNarrative(
   body: NarrativeBody,
   host: ToolHost,
-): Promise<StagedResult<{ summary: string }>> {
+): Promise<StagedResult<Narrative>> {
   const req: NarrativeRequest = {
     ...body.request,
     files: splitPatch(body.request.patch),
-    tools: host.snapshot !== null,
+    tools: true,
   };
-  return staged(body, host, (prev) => buildNarrativePrompt(req, prev), narrativeSchema);
+  return staged(
+    `narrative: ${req.step.name}`,
+    body,
+    host,
+    (prev) => buildNarrativePrompt(req, prev),
+    narrativeSchema,
+    `${req.step.name}: ${req.step.intent}`,
+  );
 }

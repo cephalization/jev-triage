@@ -81,3 +81,8 @@ export async function listModels(
   if (!res.ok) throw new Error(`${KINDS[kind].label} answered ${res.status} for the model list`);
   return parseModels(await res.json());
 }
+
+/** The first character of a key that cannot travel in an HTTP header, or null when it is clean. */
+export function badHeaderChar(key: string): string | null {
+  return /[^\x21-\x7e]/.exec(key)?.[0] ?? null;
+}

@@ -3,7 +3,51 @@ import type { SystemOne } from "@triage/triage";
 
 process.env.ZERO_UPSTREAM_DB ??= "postgres://unused";
 process.env.AUTH_SECRET ??= "test";
-const { generateStaged, inProcessAgent } = await import("../src/review/stages.ts");
+const { generateStaged } = await import("../src/review/stages.ts");
+const { Tracer } = await import("@triage/triage/trace");
+const tracer = Tracer.off();
+const root = tracer.start("test", "CHAIN", null);
+type AgentStage = import("../src/review/stages.ts").AgentStage;
+const snapshot = { owner: "o", repo: "r", sha: "abc" };
+
+/** An agent that answers from prompt text, so the stages can be checked without a cell. */
+function fakeAgent(
+  complete: (
+    prompt: string,
+  ) => Promise<{ text: string; inputTokens: number; outputTokens: number }>,
+): AgentStage {
+  const usage = {
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsd: 0.001,
+    priced: true,
+    toolCalls: 0,
+  };
+  return {
+    async skeleton(req) {
+      const { buildSkeletonPrompt, skeletonSchema, extractJson } =
+        await import("@triage/triage/review");
+      const c = await complete(buildSkeletonPrompt(req, null));
+      return {
+        result: extractJson(c.text, skeletonSchema),
+        inputTokens: c.inputTokens,
+        outputTokens: c.outputTokens,
+        ...usage,
+      };
+    },
+    async narrative(req) {
+      const { buildNarrativePrompt, narrativeSchema, extractJson } =
+        await import("@triage/triage/review");
+      const c = await complete(buildNarrativePrompt(req, null));
+      return {
+        result: extractJson(c.text, narrativeSchema),
+        inputTokens: c.inputTokens,
+        outputTokens: c.outputTokens,
+        ...usage,
+      };
+    },
+  };
+}
 
 const file = (path: string, body: string) =>
   `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1,2 @@\n-old\n${body}\n`;
@@ -69,10 +113,12 @@ describe("staged generation", () => {
       patch,
       previous: null,
       systemOne,
-      loadSnapshot: async () => null,
-      agent: () => inProcessAgent(complete),
+      loadSnapshot: async () => snapshot,
+      agent: () => fakeAgent(complete),
       classify: async () => [],
       ask,
+      tracer,
+      root,
       onPhase: async (phase, groups) => {
         phases.push(`${phase}${groups ? `:${groups.length}` : ""}`);
       },
@@ -85,6 +131,8 @@ describe("staged generation", () => {
     expect(peak).toBe(2);
     expect(out.inputTokens).toBe(11);
     expect(out.toolCalls).toBe(0);
+    expect(out.calls.map((c) => c.stage)).toEqual(["skeleton", "narrative", "narrative"]);
+    expect(out.costUsd).toBeCloseTo(0.003);
   });
 
   test("a previous review's unchanged steps are kept, text included, and not rewritten", async () => {
@@ -122,10 +170,12 @@ describe("staged generation", () => {
           file("docs/x.md", "+older"),
       },
       systemOne,
-      loadSnapshot: async () => null,
-      agent: () => inProcessAgent(complete),
+      loadSnapshot: async () => snapshot,
+      agent: () => fakeAgent(complete),
       classify: async () => [],
       ask,
+      tracer,
+      root,
       onPhase: async () => {},
     });
     expect(out.reusedSteps).toBe(1);

@@ -35,7 +35,7 @@ the issue done, `c` claims, `x` toggles done, `1`–`6` set the category, `/` se
   `irm https://vite.plus/ps1 | iex`). Node and the package manager are pinned in `package.json`
   and fetched by Vite+ on first use, so nothing else needs to be installed.
 - A Docker-compatible CLI that provides `docker compose` (Docker Desktop, OrbStack, Podman with
-  the docker shim), for Postgres.
+  the docker shim), for Postgres and for Arize Phoenix, which traces every guided review.
 - A TypeSafe API key ([docs.typesafe.ai](https://docs.typesafe.ai)).
 - Optionally a GitHub token, for pull request sync and higher API rate limits.
 - Optionally [celld](https://celld.dev) (`curl -fsSL celld.dev/install.sh | sh`). When it is on
@@ -134,6 +134,14 @@ and tested with canned answers, so no network is needed for the test suite.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how sync, classification, feedback and the
 triage queue fit together, and `CLAUDE.md` for the working rules if you use a coding agent.
+
+## Traces
+
+`vp run dev` also starts [Arize Phoenix](https://arize.com/docs/phoenix) from the compose file
+on http://localhost:7006. Every guided review is one trace there, following the OpenInference
+conventions: the review, each stage, every jev request with its state and answers, every model
+turn with its messages, tokens and cost, and every tool call with what it read. Set
+`PHOENIX_COLLECTOR_ENDPOINT` to send traces elsewhere, or leave it unset to send none.
 
 ## Guided reviews
 

@@ -1,12 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import {
-  buildReviewPrompt,
-  extractReviewResult,
-  generateReview,
-  normalizeGroups,
-  renderPatch,
-  splitPatch,
-} from "../src/review/index.ts";
+import { assertCoversAll, renderPatch, splitPatch } from "../src/review/index.ts";
 
 const file = (path: string, opts: { status?: "A" | "D" | "M"; lines?: number } = {}) => {
   const status = opts.status ?? "M";
@@ -50,79 +43,17 @@ describe("patch rendering", () => {
   });
 });
 
-describe("review results", () => {
-  test("extracts JSON from fences and prose", () => {
-    const json = '{"groups":[{"name":"Core","summary":"It does a thing.","files":["a.ts"]}]}';
-    expect(extractReviewResult("```json\n" + json + "\n```").groups[0]!.name).toBe("Core");
-    expect(
-      extractReviewResult("Sure! Here you go: " + json + " Hope that helps.").groups,
-    ).toHaveLength(1);
-    expect(() => extractReviewResult("no json here")).toThrow(/no JSON/);
-    expect(() => extractReviewResult('{"groups":[]}')).toThrow();
-  });
-
-  test("normalizeGroups drops unknown files, keeps first assignment, sweeps the rest", () => {
-    const out = normalizeGroups(
-      [
-        { name: "One", summary: "s", files: ["a.ts", "ghost.ts"] },
-        { name: "Two", summary: "s", files: ["a.ts", "b.ts"] },
-        { name: "Empty", summary: "s", files: ["ghost.ts"] },
-      ],
-      ["a.ts", "b.ts", "c.ts"],
-    );
-    expect(out.map((g) => [g.name, g.files])).toEqual([
-      ["One", ["a.ts"]],
-      ["Two", ["b.ts"]],
-      ["Everything else", ["c.ts"]],
-    ]);
-  });
-});
-
-describe("prompt", () => {
-  const req = {
-    patch: file("src/core.ts") + file("src/core.test.ts"),
-    intent: {
-      title: "Add widgets",
-      body: "Because.",
-      author: "ann",
-      headRef: "feat",
-      baseRef: "main",
-    },
-    previousGroups: [{ name: "Old step", summary: "s", files: ["src/core.ts"] }],
-    classification: "1. src/core.ts (core logic)",
-  };
-
-  test("carries rules, intent, classification, previous groups, manifest and diff", () => {
-    const p = buildReviewPrompt(req, null);
-    for (const s of [
-      "GUIDED code review",
-      "<intent>",
-      "Title: Add widgets",
-      "<classification>",
-      "<previous-groups>",
-      "Old step",
-      "<files>",
-      "M +2 -1 src/core.ts",
-      "<diff>",
-    ])
-      expect(p).toContain(s);
-    expect(p).not.toContain("previous response was rejected");
-    expect(buildReviewPrompt(req, "bad shape")).toContain("rejected: bad shape");
-  });
-
-  test("generateReview retries once with the error folded in, then gives up", async () => {
-    const prompts: string[] = [];
-    const answers = [
-      "not json",
-      '{"groups":[{"name":"Core","summary":"s","files":["src/core.ts"]}]}',
+describe("review coverage", () => {
+  test("every file in exactly one step, or a loud failure", () => {
+    const groups = [
+      { name: "A", summary: "s", files: ["a.ts"] },
+      { name: "B", summary: "s", files: ["b.ts"] },
     ];
-    const result = await generateReview(req, async (p) => {
-      prompts.push(p);
-      return answers.shift()!;
-    });
-    expect(result.groups[0]!.name).toBe("Core");
-    expect(prompts).toHaveLength(2);
-    expect(prompts[1]).toContain("rejected");
-    await expect(generateReview(req, async () => "nope")).rejects.toThrow(/failed validation/);
+    expect(() => assertCoversAll(groups, ["a.ts", "b.ts"])).not.toThrow();
+    expect(() => assertCoversAll(groups, ["a.ts", "b.ts", "c.ts"])).toThrow(/not placed.*c\.ts/);
+    expect(() => assertCoversAll(groups, ["a.ts"])).toThrow(/not in the diff.*b\.ts/);
+    expect(() =>
+      assertCoversAll([...groups, { name: "C", summary: "s", files: ["a.ts"] }], ["a.ts", "b.ts"]),
+    ).toThrow(/two steps/);
   });
 });

@@ -44,6 +44,9 @@ export const env = {
   /** The reviewer cell (apps/reviewer). Unset means reviews run inside this process. */
   reviewCellUrl: process.env.REVIEW_CELL_URL?.trim().replace(/\/+$/, "") || null,
   reviewCellToken: process.env.REVIEWER_TOKEN?.trim() || null,
+  /** Arize Phoenix (OTLP/HTTP) for guided-review traces; the compose file serves it on 7006. */
+  phoenixEndpoint: process.env.PHOENIX_COLLECTOR_ENDPOINT?.trim().replace(/\/+$/, "") || null,
+  phoenixProject: process.env.PHOENIX_PROJECT_NAME?.trim() || "typeful-triage",
   priceInputPerMTok: optionalNumber("TYPESAFE_PRICE_INPUT_PER_MTOK"),
   priceOutputPerMTok: optionalNumber("TYPESAFE_PRICE_OUTPUT_PER_MTOK"),
 };

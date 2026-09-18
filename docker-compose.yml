@@ -16,5 +16,18 @@ services:
       timeout: 2s
       retries: 30
 
+  # Arize Phoenix: traces of every guided review (jev calls, agent turns, tool calls, cost).
+  # UI and OTLP/HTTP on 7006, OTLP/gRPC on 7004; SQLite under the phoenix_data volume.
+  phoenix:
+    image: arizephoenix/phoenix:version-20.14.0
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+    ports:
+      - "7006:6006"
+      - "7004:4317"
+    volumes:
+      - phoenix_data:/mnt/data
+
 volumes:
   pgdata:
+  phoenix_data:

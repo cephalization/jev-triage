@@ -16,7 +16,6 @@ export interface GuidedReviewRow {
   groups_json: { name: string; summary: string; files: string[] }[];
   file_count: number;
   error: string | null;
-  source: string;
   input_tokens: number;
   output_tokens: number;
   created_at: number;
@@ -93,8 +92,7 @@ export function GuidedReview({
         trailing={
           ready && (
             <span className="text-xs text-muted-foreground">
-              {steps} steps · {ready.source === "seed" ? "classified order" : ready.model} ·{" "}
-              {ago(ready.finished_at, now)}
+              {steps} steps · {ready.model} · {ago(ready.finished_at, now)}
             </span>
           )
         }

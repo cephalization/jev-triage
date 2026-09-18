@@ -69,6 +69,8 @@ async function waitFor(url, ms = 20_000) {
 }
 
 await once("postgres", "docker", ["compose", "up", "-d", "--wait"]);
+env.PHOENIX_COLLECTOR_ENDPOINT ||= "http://localhost:7006";
+console.log(`[dev] Phoenix traces at ${env.PHOENIX_COLLECTOR_ENDPOINT}`);
 await once("migrate", "pnpm", ["--filter", "@triage/api", "migrate"]);
 
 const children = [];
@@ -107,7 +109,7 @@ if (hasCelld()) {
   console.log(`[dev] reviewer cell at ${env.REVIEW_CELL_URL} (celld)`);
 } else {
   console.log(
-    "[dev] celld not found; guided reviews run inside the API process. Install: curl -fsSL celld.dev/install.sh | sh",
+    "[dev] celld not found; guided reviews are unavailable until it is installed: curl -fsSL celld.dev/install.sh | sh",
   );
 }
 

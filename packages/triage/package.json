@@ -10,7 +10,8 @@
     "./calibration": "./src/calibration.ts",
     "./reviewers": "./src/reviewers.ts",
     "./types": "./src/types.ts",
-    "./review": "./src/review/index.ts"
+    "./review": "./src/review/index.ts",
+    "./trace": "./src/trace.ts"
   },
   "scripts": {
     "test": "vp test"

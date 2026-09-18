@@ -9,6 +9,7 @@ import type { Session } from "../lib/auth.ts";
 import { People } from "./People.tsx";
 import { Providers } from "./Providers.tsx";
 import { ReviewActivity } from "./ReviewActivity.tsx";
+import { ReviewCost } from "./ReviewCost.tsx";
 import { ReviewDefaults } from "./ReviewDefaults.tsx";
 import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
@@ -195,6 +196,15 @@ export function SystemPanel({
           description="The provider and model used when someone generates a review of a pull request in this repo. Anyone can change it; a run can override it."
         >
           <ReviewDefaults repo={repo} />
+        </Section>
+      )}
+
+      {repo && (
+        <Section
+          title="Review cost"
+          description="What generation costs at the providers, priced from the pi model catalog: every agent call, by day, split by model, provider or the owner of the key it ran on."
+        >
+          <ReviewCost repoId={repo.id} now={now} />
         </Section>
       )}
 

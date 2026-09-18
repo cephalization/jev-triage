@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vite-plus/test";
-import { authHeaders, KINDS, parseModels } from "../src/providers/catalog.ts";
+import { authHeaders, badHeaderChar, KINDS, parseModels } from "../src/providers/catalog.ts";
 import { decrypt, deriveKey, encrypt, hint } from "../src/providers/crypto.ts";
 
 describe("provider key encryption", () => {
@@ -58,5 +58,14 @@ describe("model catalog", () => {
     ]);
     expect(parseModels({})).toEqual([]);
     expect(parseModels(null)).toEqual([]);
+  });
+});
+
+describe("key input", () => {
+  test("a key pasted from a terminal box is refused with the character named", () => {
+    expect(badHeaderChar("sk-ant-abc123")).toBeNull();
+    expect(badHeaderChar("sk-ant-abc\u2502123")).toBe("\u2502");
+    expect(badHeaderChar("sk-ant-abc\u00a0123")).toBe("\u00a0");
+    expect(badHeaderChar("sk-ant-abc 123")).toBe(" ");
   });
 });

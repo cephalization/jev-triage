@@ -11,6 +11,7 @@ import {
   foldAssignments,
   foldChanges,
   groupsFromAssignments,
+  narrativeSchema,
   reusableSteps,
   skeletonSchema,
   splitPatch,
@@ -90,6 +91,15 @@ describe("skeleton and narrative prompts", () => {
     expect(p).toContain("+core");
     expect(p).not.toContain("+test");
     expect(p).not.toContain("rank_files");
+    expect(p).toContain('"findings"');
+    expect(p).toContain("do the review, not to tell them where to look");
+    const parsed = narrativeSchema.parse({
+      summary: "s",
+      findings: [{ severity: "concern", text: "adapter.py: retries never back off" }],
+    });
+    expect(parsed.impact).toBe("");
+    expect(parsed.findings).toHaveLength(1);
+    expect(narrativeSchema.parse({ summary: "s" }).findings).toEqual([]);
   });
 
   test("extractJson and askJson validate and retry once", async () => {

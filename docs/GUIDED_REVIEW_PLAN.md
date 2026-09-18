@@ -88,21 +88,18 @@ server.
 
 A `review` job fetches the pull request at its head commit and runs a headless agent over it.
 
-- **Two runners, one pipeline.** The prompt, retry, validation and normalisation live in
-  `packages/triage/src/review` and run in either place. The reviewer cell (`apps/reviewer`) is
-  a celld Durable Object per review that runs the pi SDK (`@earendil-works/pi-ai`, with the
-  Anthropic, OpenAI and OpenRouter providers registered and explicit keys) and answers
-  `POST /runs/{id}`; `REVIEW_CELL_URL` points the API at it, and `vp run dev` starts it when
-  celld is installed. Without a cell the API's in-process runner
-  (`apps/api/src/review/runner.ts`) calls the provider's HTTP API directly. The diff comes
-  from GitHub's pull request diff endpoint with the server token; no checkout yet. Ten-minute
-  timeout, one run in flight per pull request, orphaned runs failed on restart. The cell is
-  where tools and a repository snapshot go next, so the agent can read beyond the diff.
+- **One runner.** The prompts, retry and validation live in `packages/triage/src/review`. The
+  reviewer cell (`apps/reviewer`) is a celld Durable Object per review that runs the pi SDK
+  (`@earendil-works/pi-ai`, with the Anthropic, OpenAI and OpenRouter providers registered and
+  explicit keys); `REVIEW_CELL_URL` points the API at it, and `vp run dev` starts it when celld
+  is installed. Without the cell generation is refused with that reason; there is no in-process
+  runner. The diff comes from GitHub's pull request diff endpoint with the server token.
+  Ten-minute timeout, one run in flight per pull request, orphaned runs failed on restart.
 - **Isolation.** The cell is the agent's environment: a Durable Object per review with its own
   storage, no process, no shell, network only to the provider. That is enough for a diff-only
   review. When the agent needs to read the repository, give the cell a snapshot (tarball or
   GitHub contents API through a tool) rather than a checkout, so the boundary stays the
-  Worker's. The in-process runner stays as the no-celld fallback.
+  Worker's.
 - **Storage.** `guided_review(id, pull_id, repo_id, head_sha, status, provider_id, model,
 groups_json, file_count, error, input_tokens, output_tokens, created_by, created_at,
 started_at, finished_at)` in Zero, the patch in `private.review_patch`. The row is the
@@ -125,8 +122,7 @@ The agent writes narrative; jev supplies structure it can rely on, cheaply and r
 - `groupSeed()` turns the answers into the ordered proposal: core first (entry points and the
   riskiest leading), adoption, tests, docs, config, churn last. `renderClassification()` is what
   the agent receives as `<classification>`; it may merge or reorder but must place every file.
-  If the agent fails and the proposal exists, the proposal is served as the review with
-  `source = 'seed'` and the agent's error on the row, so a review always exists.
+  The proposal is input to the model only; it is never shown as a review.
 - Answers live in `guided_review_file` (one row per review and path, with
   `REVIEW_FILE_QUESTIONS_VERSION`), and the review screen shows them as the reason a file sits
   where it does. Every request is a `run` row of kind `review_files`, so it counts toward cost.
@@ -170,6 +166,11 @@ agent writes, in parallel, with the repository within reach.
   per file over the step names, one request). The agent writes each step's narrative in its own
   call with only that step's files, six at a time. The row's `phase` and the skeleton stream to
   every viewer; the screen shows steps with "Writing this step…" until each text lands.
+- **No fallbacks.** Every stage succeeds or throws, and a thrown stage fails the review with
+  its reason: a snapshot that will not load, a classification or assignment request that
+  errors, a model answer that fails validation twice, a file left out of every step. Nothing
+  degraded is ever shown as a review, because a degraded review reads like a real one and
+  misleads. (Phase 4's "classified order" fallback and the in-process runner were removed.)
 - **Incremental regeneration.** Hunks are compared ignoring offsets; jev judges whether the
   rest changed materially. Steps whose files are all unchanged are kept whole (name, text, marks)
   and the skeleton is told to leave them alone. `reused_steps` records it.
@@ -182,6 +183,29 @@ agent writes, in parallel, with the repository within reach.
   bytes, SQLite bytes) and run record. Repo → "Review environment" shows the totals, each
   snapshot with its size and age, and a delete per snapshot. The API proxies it at
   `GET /api/repos/:owner/:name/cell`.
+
+## Phase 8: provider cost (done)
+
+- Every agent call is priced where it runs: the pi SDK computes `usage.cost` from its model
+  catalog in the cell. A model the catalog does not know (any
+  OpenAI-compatible server, a brand-new release) is stored as `priced = false` with tokens only,
+  never a guessed dollar figure.
+- `llm_cost` holds one row per call: repo, review, provider and kind, model, the key's owner at
+  the time (`provider.key_set_by`, recorded when an admin stores the key), who asked, the stage
+  (skeleton, narrative, single), tokens in, out, cache read and cache write, and the cost. The
+  review row carries the sum.
+- System → "Review cost" buckets the rows by day and splits them by model, provider or key
+  owner over 7, 30 or 90 days, with a table of calls, tokens and cost per value. The activity
+  list and the review header show each review's cost.
+
+## Phase 9: tracing (done)
+
+Every review is a trace in Arize Phoenix (`docker-compose.yml`, UI and OTLP on 7006, gRPC on
+7004). See ARCHITECTURE → Traces. Notes for the tracer: Phoenix's `/v1/traces` takes protobuf
+only (JSON answers 415), so the shared tracer encodes OTLP by hand rather than pulling the
+OpenTelemetry SDK into the cell's bundle; the OpenTelemetry Node SDK would work in the API but
+not in workerd, and no OpenInference instrumentation exists for pi-ai, so spans are explicit
+either way.
 
 ## Testing
 

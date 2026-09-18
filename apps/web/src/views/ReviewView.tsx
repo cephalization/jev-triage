@@ -13,6 +13,7 @@ import { Button } from "../components/ui/button.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { KeyHelp, ViewHeader } from "../components/ViewHeader.tsx";
 import { isStale } from "../components/GuidedReview.tsx";
+import { money } from "../components/ReviewCost.tsx";
 import { fetchReviewPatch, generateGuidedReview } from "../lib/api.ts";
 import { ago, compact, reviewPhaseText } from "../lib/format.ts";
 import { isTyping } from "../lib/keys.ts";
@@ -46,6 +47,8 @@ interface Step {
   name: string;
   summary: string;
   files: string[];
+  impact?: string;
+  findings?: { severity: "blocker" | "concern" | "note"; text: string }[];
   /** The synthetic "changed since generation" step cannot be marked. */
   markable: boolean;
 }
@@ -219,8 +222,8 @@ export function ReviewView() {
       <ViewHeader title="Guided review">
         {ready && (
           <span className="truncate text-xs text-muted-foreground">
-            {ready.source === "seed" ? "classified order" : ready.model} ·{" "}
-            {compact(ready.input_tokens)} in / {compact(ready.output_tokens)} out
+            {ready.model} · {compact(ready.input_tokens)} in / {compact(ready.output_tokens)} out
+            {ready.priced && ready.cost_usd > 0 ? ` · ${money(ready.cost_usd)}` : ""}
             {ready.creator ? ` · by ${ready.creator.name}` : ""} · {ago(ready.finished_at, now)}
             {running && ` · ${reviewPhaseText(latest?.phase).toLowerCase()}…`}
           </span>
@@ -270,12 +273,6 @@ export function ReviewView() {
           </span>
         </p>
       )}
-      {ready?.source === "seed" && ready.error && (
-        <p className="border-b bg-muted/40 px-4 py-2 text-xs text-muted-foreground text-pretty">
-          The model failed to write the walkthrough ({ready.error}). These steps are the code's
-          classified order; regenerate to try again.
-        </p>
-      )}
 
       {!ready ? (
         <Empty pull={pull} latest={latest} running={running} loading={loading} />
@@ -299,6 +296,32 @@ export function ReviewView() {
                       <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-primary/25 border-t-primary" />
                       Writing this step…
                     </p>
+                  )}
+                  {step.impact && (
+                    <p className="text-sm leading-6 text-pretty">
+                      <span className="text-xs font-medium text-muted-foreground">Impact </span>
+                      <span className="text-foreground/80">{step.impact}</span>
+                    </p>
+                  )}
+                  {step.findings && step.findings.length > 0 && (
+                    <ol className="flex flex-col gap-1.5">
+                      {step.findings.map((f, i) => (
+                        <li key={i} className="flex gap-2 text-sm leading-6">
+                          <span
+                            className={cn(
+                              "mt-2 size-2 shrink-0 rounded-full",
+                              f.severity === "blocker"
+                                ? "bg-status-critical"
+                                : f.severity === "concern"
+                                  ? "bg-status-warning"
+                                  : "bg-muted-foreground/50",
+                            )}
+                            title={f.severity}
+                          />
+                          <span className="text-pretty text-foreground/90">{f.text}</span>
+                        </li>
+                      ))}
+                    </ol>
                   )}
                   <div className="flex flex-col gap-1">
                     {step.files.map((path) => {

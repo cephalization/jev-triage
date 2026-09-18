@@ -1,3 +1,4 @@
+import { badHeaderChar } from "./providers/catalog.ts";
 import { serve } from "@hono/node-server";
 import type { ZeroContext } from "@triage/schema";
 import { Hono } from "hono";
@@ -15,7 +16,13 @@ import {
 } from "./github/account.ts";
 import { isSyncing, syncRepo } from "./github/sync.ts";
 import { isKind, KINDS, listModels } from "./providers/catalog.ts";
-import { failOrphanedReviews, isGenerating, runReviewJob } from "./review/job.ts";
+import {
+  failOrphanedReviews,
+  generationBlocker,
+  isGenerating,
+  runReviewJob,
+} from "./review/job.ts";
+import { OI, Tracer } from "@triage/triage/trace";
 import { askSystemOne } from "./review/jev.ts";
 import { overBudget, RateLimiter } from "./review/limits.ts";
 import { noul } from "@typesafe-ai/sdk";
@@ -161,12 +168,24 @@ app.get("/api/providers/kinds", (c) => c.json({ kinds: KINDS }));
 
 const keyBody = z.object({ key: z.string().trim().min(1).max(500) });
 app.put("/api/providers/:id/key", async (c) => {
-  if (!(await requireAdmin(c))) return c.json({ error: "admins only" }, 403);
+  const admin = await requireAdmin(c);
+  if (!admin) return c.json({ error: "admins only" }, 403);
   const id = c.req.param("id");
   if (!(await getProvider(id))) return c.json({ error: "no such provider" }, 404);
   const parsed = keyBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "key required" }, 400);
-  const keyHint = await setProviderKey(id, parsed.data.key);
+  // A key travels in an HTTP header. Pasting from a terminal box or a rich-text field can
+  // smuggle in a box-drawing character or a non-breaking space, and every call then fails
+  // with "Invalid header value"; refuse it here and name the culprit.
+  const bad = badHeaderChar(parsed.data.key);
+  if (bad !== null)
+    return c.json(
+      {
+        error: `the key contains a character that cannot go in a header: ${JSON.stringify(bad)}. Paste it again from the provider's console.`,
+      },
+      400,
+    );
+  const keyHint = await setProviderKey(id, parsed.data.key, admin.userID);
   return c.json({ ok: true, keyHint });
 });
 
@@ -236,6 +255,8 @@ app.post("/api/reviews", async (c) => {
   if (!providerId || !model)
     return c.json({ error: "pick a provider and model in System → Guided reviews first" }, 400);
   if (isGenerating(pullId)) return c.json({ error: "a review is already generating" }, 409);
+  const blocker = await generationBlocker(systemOne);
+  if (blocker) return c.json({ error: blocker }, 503);
   const id = newId();
   await sql`insert into guided_review (id, pull_id, repo_id, provider_id, model, created_by)
     values (${id}, ${pullId}, ${pull.repo_id}, ${providerId}, ${model}, ${ctx.userID})`;
@@ -250,6 +271,15 @@ app.post("/api/reviews", async (c) => {
  */
 const rerankBody = z.object({
   repo: z.string().min(3),
+  trace: z
+    .object({
+      endpoint: z.string(),
+      project: z.string(),
+      traceId: z.string(),
+      parentSpanId: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
   question: z.string().min(1).max(500),
   candidates: z.array(z.string().min(1).max(500)).min(1).max(40),
 });
@@ -262,7 +292,12 @@ app.post("/api/internal/rerank", async (c) => {
   if (!systemOne) return c.json({ error: "no classifier configured" }, 503);
   const parsed = rerankBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "question and candidates required" }, 400);
-  const { repo, question, candidates } = parsed.data;
+  const { repo, question, candidates, trace } = parsed.data;
+  const tracer = trace ? new Tracer(trace.endpoint, trace.project, "typeful-api") : Tracer.off();
+  const span = tracer.start("rank_files", "RERANKER", trace ?? null, {
+    [OI.inputValue]: JSON.stringify({ question, candidates }),
+    [OI.inputMime]: "application/json",
+  });
   const questions: Record<string, ReturnType<typeof noul>> = {};
   candidates.forEach((_, i) => {
     questions[`r${i}`] = noul(
@@ -274,21 +309,32 @@ app.post("/api/internal/rerank", async (c) => {
     );
   });
   try {
-    const result = await askSystemOne(systemOne, {
-      repoId: repo,
-      kind: "review_rerank",
-      state: { question, candidates: candidates.map((path) => ({ path })) },
-      questions,
-      items: candidates.length,
-    });
+    const result = await askSystemOne(
+      systemOne,
+      {
+        repoId: repo,
+        kind: "review_rerank",
+        state: { question, candidates: candidates.map((path) => ({ path })) },
+        questions,
+        items: candidates.length,
+      },
+      { tracer, parent: span },
+    );
     const ranked = candidates
       .map((path, i) => {
         const a = result.answers[`r${i}`] as { noul?: number } | undefined;
         return { path, relevance: a?.noul ?? 0 };
       })
       .sort((a, b) => b.relevance - a.relevance);
+    tracer.end(span, {
+      [OI.outputValue]: JSON.stringify(ranked),
+      [OI.outputMime]: "application/json",
+    });
+    await tracer.flush();
     return c.json({ ranked });
   } catch (e) {
+    tracer.end(span, {}, e);
+    await tracer.flush();
     return c.json({ error: e instanceof Error ? e.message : String(e) }, 502);
   }
 });
