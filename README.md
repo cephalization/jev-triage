@@ -129,7 +129,9 @@ vp run -r test   # unit tests in every package
 vp run migrate   # apply new SQL migrations to the running database
 ```
 
-The API restarts on every save; the web app hot-reloads. Question builders and policy are pure
+The API restarts on every save; the web app hot-reloads. Each start first fails whatever the
+previous process left running (a sync, a classification batch, a review) with "interrupted by
+a server restart", so nothing stays stuck and the Sync button comes back. Question builders and policy are pure
 and tested with canned answers, so no network is needed for the test suite.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how sync, classification, feedback and the

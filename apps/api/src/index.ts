@@ -15,13 +15,9 @@ import {
   type GithubUser,
 } from "./github/account.ts";
 import { isSyncing, syncRepo } from "./github/sync.ts";
+import { recoverOnBoot } from "./recover.ts";
 import { isKind, KINDS, listModels } from "./providers/catalog.ts";
-import {
-  failOrphanedReviews,
-  generationBlocker,
-  isGenerating,
-  runReviewJob,
-} from "./review/job.ts";
+import { generationBlocker, isGenerating, runReviewJob } from "./review/job.ts";
 import {
   OpenInferenceSpanKind,
   SemanticConventions as S,
@@ -461,6 +457,8 @@ serve({ fetch: app.fetch, port: env.port }, (info) => {
   console.log(
     `[api] listening on http://localhost:${info.port} (typesafe ${env.typesafeKey ? "on" : "OFF"}, github token ${env.githubToken ? "on" : "off"})`,
   );
-  void worker.pokeAllWithPendingWork();
-  void failOrphanedReviews();
+  void (async () => {
+    await recoverOnBoot();
+    await worker.pokeAllWithPendingWork();
+  })();
 });

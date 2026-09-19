@@ -127,8 +127,6 @@ export class ClassifierWorker {
   }
 
   async pokeAllWithPendingWork(): Promise<void> {
-    await sql`update issue set classifying = false where classifying`;
-    await sql`update pull set classifying = false where classifying`;
     // Counters survive restarts: seed in-memory stats from the last persisted values.
     const states = await sql<
       { repo_id: string; requests: number; dropped_triggers: number; coalesced_triggers: number }[]

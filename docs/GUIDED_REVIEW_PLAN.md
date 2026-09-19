@@ -98,8 +98,10 @@ A `review` job fetches the pull request at its head commit and runs a headless a
   A cell answers each request inside celld's handler budget (300 s by default), so a stage runs
   in parts: the agent works for a minute of turns, the cell stores the conversation in its
   SQLite and answers `running`, and the API posts the same body again to resume it
-  (`apps/reviewer/src/resume.ts`). One run in flight per pull request, orphaned runs failed on
-  restart.
+  (`apps/reviewer/src/resume.ts`). One run in flight per pull request. On boot the API fails every job a
+  dead process left behind (`apps/api/src/recover.ts`): syncing repositories, running run
+  rows, classifying flags, in-flight worker state and running reviews, each with "interrupted
+  by a server restart" as the reason, before any work starts.
 - **Isolation.** The cell is the agent's environment: a Durable Object per review with its own
   storage, no process, no shell, network only to the provider. That is enough for a diff-only
   review. When the agent needs to read the repository, give the cell a snapshot (tarball or

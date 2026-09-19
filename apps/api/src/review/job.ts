@@ -255,9 +255,3 @@ async function driveReview(
     root.end();
   }
 }
-
-/** Rows left running by a previous process are failed on startup rather than spinning forever. */
-export async function failOrphanedReviews(): Promise<void> {
-  await sql`update guided_review set status = 'failed', phase = null, error = 'the server restarted during generation', finished_at = now()
-    where status in ('queued', 'running')`;
-}
