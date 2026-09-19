@@ -40,10 +40,20 @@ export type SyncHooks = {
   onPage?: (repoId: string, stored: number) => void;
 };
 
+/** No GitHub call may hang a sync: past this, the request fails and the sync reports it. */
+const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
+
 export function makeOctokit() {
   return new Octokit({
     auth: env.githubToken ?? undefined,
     baseUrl: env.githubSyncApiUrl,
+    request: {
+      fetch: (url: string | URL | Request, init?: RequestInit) => {
+        const timeout = AbortSignal.timeout(GITHUB_REQUEST_TIMEOUT_MS);
+        const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+        return fetch(url, { ...init, signal });
+      },
+    },
     throttle: {
       onRateLimit: (
         retryAfter: number,

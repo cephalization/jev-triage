@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --watch --env-file-if-exists=../../.env src/index.ts",
-    "start": "node --env-file-if-exists=../../.env src/index.ts",
+    "dev": "node --trace-warnings --watch --env-file-if-exists=../../.env src/index.ts",
+    "start": "node --trace-warnings --env-file-if-exists=../../.env src/index.ts",
     "migrate": "node --env-file-if-exists=../../.env src/db/migrate.ts",
     "zero": "zero-cache-dev",
     "emulate": "emulate start --service github --port 4001 --seed ../../emulate.config.yaml",
