@@ -94,7 +94,7 @@ A `review` job fetches the pull request at its head commit and runs a headless a
   explicit keys); `REVIEW_CELL_URL` points the API at it. The cell runs as the `reviewer` compose service
   (`ghcr.io/denoland/celld`) on a bundle `vp run dev` builds with esbuild and keeps rebuilding;
   no binary is installed. Without the cell generation is refused with that reason; there is no
-  in-process runner. The diff comes from GitHub's pull request diff endpoint with the server token.
+  in-process runner. The diff is built in the cell from two snapshots, the merge base (from GitHub's compare API) and the head, because GitHub refuses a pull request diff past 300 files or 20,000 lines (`apps/reviewer/src/diff.ts`); files the snapshot rules leave out (binary, generated, oversized) appear as binary changes.
   A cell answers each request inside celld's handler budget (300 s by default), so a stage runs
   in parts: the agent works for a minute of turns, the cell stores the conversation in its
   SQLite and answers `running`, and the API posts the same body again to resume it

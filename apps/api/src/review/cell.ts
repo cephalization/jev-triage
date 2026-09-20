@@ -58,3 +58,23 @@ export async function loadSnapshotInCell(
     throw new Error(`repository snapshot ${s.status ?? res.status}: ${s.error ?? "no detail"}`);
   return { owner, repo, sha };
 }
+
+/** The diff between two loaded snapshots, as git unified text; throws with the cell's reason. */
+export async function diffInCell(
+  cell: Cell,
+  repoId: string,
+  baseSha: string,
+  headSha: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const [owner, repo] = repoId.split("/") as [string, string];
+  const res = await fetchImpl(`${cell.url}/diff/${owner}/${repo}/${baseSha}...${headSha}`, {
+    headers: cellHeaders(cell),
+    signal: AbortSignal.timeout(180_000),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(`diff in the reviewer cell: ${body.error ?? `status ${res.status}`}`);
+  }
+  return res.text();
+}

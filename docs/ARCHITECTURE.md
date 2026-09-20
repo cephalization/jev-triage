@@ -124,8 +124,9 @@ the code's `QUESTIONS_VERSION` when the code moves ahead.
 ### Guided review
 
 `POST /api/reviews` queues a `guided_review` row and `runReviewJob` drives it in stages
-(`apps/api/src/review/stages.ts`). The diff comes from GitHub. The reviewer cell loads a
-snapshot of the repository at the head while jev answers four questions per changed file
+(`apps/api/src/review/stages.ts`). The reviewer cell loads snapshots of the
+repository at the merge base and at the head and builds the unified diff itself, since GitHub
+refuses a pull request diff past 300 files or 20,000 lines; jev then answers four questions per changed file
 (`packages/triage/src/review/files.ts`, stored in `guided_review_file`, one `run` row per
 batch). The agent names the steps in one short call; jev assigns every file to a step in one
 request; the agent writes each step's text in parallel, reading the snapshot through

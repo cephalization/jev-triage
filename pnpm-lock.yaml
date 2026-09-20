@@ -316,6 +316,9 @@ importers:
       '@triage/triage':
         specifier: workspace:*
         version: link:../../packages/triage
+      diff:
+        specifier: ^9.0.0
+        version: 9.0.0
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^5.20260915.1

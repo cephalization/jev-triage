@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { cut } from "@triage/triage";
-import { isText, stripRoot, wanted } from "./snapshot-rules.ts";
+import { contentHash } from "./diff.ts";
+import { isText, skipReason, stripRoot } from "./snapshot-rules.ts";
 import { readTar } from "./tar.ts";
 
 /**
@@ -28,15 +29,22 @@ export interface SnapshotStats {
 
 const decoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: false });
 
+/** Bumped when the tables change shape; an older snapshot reloads from GitHub on first use. */
+const FORMAT = "3";
+
 export class RepoSnapshot extends DurableObject<SnapshotEnv> {
   #loading: Promise<SnapshotStats> | null = null;
 
   constructor(ctx: DurableObjectState, env: SnapshotEnv) {
     super(ctx, env);
     ctx.storage.sql.exec(
-      `CREATE TABLE IF NOT EXISTS file (path TEXT PRIMARY KEY, size INTEGER NOT NULL, text TEXT NOT NULL);
+      `CREATE TABLE IF NOT EXISTS file (path TEXT PRIMARY KEY, size INTEGER NOT NULL, text TEXT NOT NULL, hash TEXT);
+       CREATE TABLE IF NOT EXISTS skipped (path TEXT PRIMARY KEY, size INTEGER NOT NULL, reason TEXT NOT NULL);
        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
     );
+    const cols = ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(file)").toArray();
+    if (!cols.some((c) => c.name === "hash"))
+      ctx.storage.sql.exec("ALTER TABLE file ADD COLUMN hash TEXT");
   }
 
   #meta(key: string): string | null {
@@ -73,7 +81,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
     };
   }
 
-  /** Fill from GitHub once; concurrent callers share the same load. */
+  /** Fill from GitHub once; concurrent callers share the same load. A snapshot in an older shape reloads. */
   async ensure(args: {
     owner: string;
     repo: string;
@@ -82,7 +90,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
     token: string | null;
   }): Promise<SnapshotStats> {
     const current = this.stats();
-    if (current.status === "ready") return current;
+    if (current.status === "ready" && this.#meta("format") === FORMAT) return current;
     if (this.#loading) return this.#loading;
     this.#loading = this.#load(args).finally(() => {
       this.#loading = null;
@@ -102,6 +110,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
     this.#setMeta("sha", args.sha);
     this.#setMeta("status", "loading");
     this.ctx.storage.sql.exec("DELETE FROM file");
+    this.ctx.storage.sql.exec("DELETE FROM skipped");
     const t0 = Date.now();
     try {
       const url = `${args.apiBase.replace(/\/+$/, "")}/repos/${args.owner}/${args.repo}/tarball/${args.sha}`;
@@ -115,29 +124,52 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
       if (!res.ok || !res.body) throw new Error(`GitHub answered ${res.status} for the tarball`);
       const gunzip = res.body.pipeThrough(new DecompressionStream("gzip"));
       let batch: { path: string; size: number; text: string }[] = [];
+      let skipped: { path: string; size: number; reason: string }[] = [];
       const flush = () => {
-        if (batch.length === 0) return;
+        if (batch.length === 0 && skipped.length === 0) return;
         const rows = batch;
+        const left = skipped;
         batch = [];
+        skipped = [];
         this.ctx.storage.transactionSync(() => {
           for (const r of rows)
             this.ctx.storage.sql.exec(
-              "INSERT OR REPLACE INTO file (path, size, text) VALUES (?, ?, ?)",
+              "INSERT OR REPLACE INTO file (path, size, text, hash) VALUES (?, ?, ?, ?)",
               r.path,
               r.size,
               r.text,
+              contentHash(r.text),
+            );
+          for (const r of left)
+            this.ctx.storage.sql.exec(
+              "INSERT OR REPLACE INTO skipped (path, size, reason) VALUES (?, ?, ?)",
+              r.path,
+              r.size,
+              r.reason,
             );
         });
       };
       await readTar(gunzip, {
-        want: (path, size) => wanted(stripRoot(path), size),
+        want: (rawPath, size) => {
+          const path = stripRoot(rawPath);
+          const reason = skipReason(path, size);
+          // A file left out is remembered so a diff can still say it changed; an empty file
+          // is remembered as such so a diff can show it created or emptied.
+          if (reason !== null) skipped.push({ path, size, reason });
+          return reason === null;
+        },
         onEntry: (e) => {
-          if (!isText(e.bytes)) return;
-          batch.push({ path: stripRoot(e.path), size: e.size, text: decoder.decode(e.bytes) });
+          const path = stripRoot(e.path);
+          if (!isText(e.bytes)) {
+            skipped.push({ path, size: e.size, reason: "binary" });
+            return;
+          }
+          batch.push({ path, size: e.size, text: decoder.decode(e.bytes) });
           if (batch.length >= 200) flush();
         },
       });
       flush();
+      this.#setMeta("format", FORMAT);
       this.#setMeta("status", "ready");
       this.#setMeta("error", "");
       this.#setMeta("created_at", String(Date.now()));
@@ -180,6 +212,49 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
         limit,
       )
       .toArray();
+  }
+
+  /** Every kept file's path, size and hash, and every file left out, for diffing two snapshots. */
+  manifest(): {
+    files: [string, { size: number; hash: string }][];
+    skipped: [string, { size: number; reason: string }][];
+  } {
+    const files = this.ctx.storage.sql
+      .exec<{ path: string; size: number; hash: string }>("SELECT path, size, hash FROM file")
+      .toArray()
+      .map(
+        (r) => [r.path, { size: r.size, hash: r.hash }] as [string, { size: number; hash: string }],
+      );
+    const skipped = this.ctx.storage.sql
+      .exec<{ path: string; size: number; reason: string }>(
+        "SELECT path, size, reason FROM skipped",
+      )
+      .toArray()
+      .map(
+        (r) =>
+          [r.path, { size: r.size, reason: r.reason }] as [
+            string,
+            { size: number; reason: string },
+          ],
+      );
+    return { files, skipped };
+  }
+
+  /** The text of many files at once, for a diff; paths not kept are absent. */
+  texts(paths: string[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    // workerd's SQLite allows few bound parameters per statement; stay well under.
+    for (let i = 0; i < paths.length; i += 50) {
+      const chunk = paths.slice(i, i + 50);
+      const rows = this.ctx.storage.sql
+        .exec<{ path: string; text: string }>(
+          `SELECT path, text FROM file WHERE path IN (${chunk.map(() => "?").join(",")})`,
+          ...chunk,
+        )
+        .toArray();
+      for (const r of rows) out[r.path] = r.text;
+    }
+    return out;
   }
 
   read(path: string): { path: string; size: number; text: string } | null {
@@ -251,7 +326,7 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
       await this.clear();
       return Response.json({ ok: true });
     }
-    if (request.method === "POST") {
+    if (request.method === "POST" && tail !== "texts") {
       const body = (await request.json()) as {
         owner: string;
         repo: string;
@@ -260,6 +335,14 @@ export class RepoSnapshot extends DurableObject<SnapshotEnv> {
         token: string | null;
       };
       return Response.json(await this.ensure(body));
+    }
+    if (tail === "manifest") return Response.json(this.manifest());
+    if (tail === "texts") {
+      const body = (await request.json().catch(() => ({}))) as { paths?: unknown };
+      const paths = Array.isArray(body.paths)
+        ? body.paths.filter((p): p is string => typeof p === "string")
+        : [];
+      return Response.json(this.texts(paths));
     }
     if (tail === "file") {
       const path = url.searchParams.get("path") ?? "";

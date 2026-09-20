@@ -10,9 +10,18 @@ const SKIP_FILES =
   /\.(png|jpe?g|gif|webp|ico|svg|pdf|woff2?|ttf|eot|otf|zip|gz|tgz|jar|wasm|mp[34]|mov|snap|min\.js|min\.css|map|lock|lockb|pyc|class|so|dylib|dll|exe|bin|parquet|sqlite|db)$|(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|go\.sum)$/i;
 
 export function wanted(path: string, size: number): boolean {
-  if (size === 0 || size > MAX_FILE_BYTES) return false;
-  if (SKIP_DIRS.test(path) || SKIP_FILES.test(path)) return false;
-  return true;
+  return skipReason(path, size) === null;
+}
+
+/** Why a file is not kept as text, or null when it is. Size 0 is an empty file; not worth a row. */
+export function skipReason(
+  path: string,
+  size: number,
+): "empty" | "too large" | "generated or vendored" | null {
+  if (size === 0) return "empty";
+  if (SKIP_DIRS.test(path) || SKIP_FILES.test(path)) return "generated or vendored";
+  if (size > MAX_FILE_BYTES) return "too large";
+  return null;
 }
 
 /** No NUL byte in the first 8 KB: good enough to tell source from a binary that slipped past the rules. */

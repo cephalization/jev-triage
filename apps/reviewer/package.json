@@ -14,7 +14,8 @@
     "@earendil-works/pi-ai": "^0.85.1",
     "@opentelemetry/api": "^1.9.1",
     "@triage/openinference-workers": "workspace:*",
-    "@triage/triage": "workspace:*"
+    "@triage/triage": "workspace:*",
+    "diff": "^9.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260915.1",

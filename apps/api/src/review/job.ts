@@ -1,4 +1,4 @@
-import type { SystemOne } from "@triage/triage";
+import { cut, type SystemOne } from "@triage/triage";
 import { splitPatch, type ReviewGroup, type ReviewIntent } from "@triage/triage/review";
 import { setSession, setUser } from "@arizeai/openinference-core";
 import {
@@ -11,7 +11,7 @@ import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 import { makeOctokit } from "../github/sync.ts";
 import { resolveProvider } from "../providers/store.ts";
-import { cellReachable, loadSnapshotInCell, type Cell } from "./cell.ts";
+import { cellReachable, diffInCell, loadSnapshotInCell, type Cell } from "./cell.ts";
 import { classifyFiles, storeFileRows } from "./files.ts";
 import { cellAgent, generateStaged, type Phase } from "./stages.ts";
 import type { CallUsage } from "./usage.ts";
@@ -29,32 +29,46 @@ const BODY_CHARS = 4000;
 
 export interface PullSnapshot {
   headSha: string;
+  /** The merge base with the target branch: what the diff is against. */
+  baseSha: string;
   intent: ReviewIntent;
   diff: string;
 }
 
-/** The pull request as GitHub has it right now: metadata for intent, and its unified diff. */
+/**
+ * The pull request as GitHub has it right now: metadata for intent, and its diff. GitHub will
+ * not serve a diff past 300 files or 20,000 lines, so the diff is built in the reviewer cell
+ * from snapshots of the merge base and the head; the head snapshot is the one the agent's
+ * tools read later, so nothing is loaded twice.
+ */
 export async function fetchPullSnapshot(
   repoId: string,
   number: number,
+  cell: Cell,
   octokit = makeOctokit(),
 ): Promise<PullSnapshot> {
   const [owner, repo] = repoId.split("/") as [string, string];
   const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: number });
-  const diffRes = await octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+  const { data: compare } = await octokit.rest.repos.compareCommitsWithBasehead({
     owner,
     repo,
-    pull_number: number,
-    mediaType: { format: "diff" },
+    basehead: `${pr.base.sha}...${pr.head.sha}`,
+    per_page: 1,
   });
-  // With the diff media type the body is the raw patch text, whatever the typed response says.
-  const diff = diffRes.data as unknown as string;
-  if (!diff.trim()) throw new Error("GitHub returned an empty diff");
+  const baseSha = compare.merge_base_commit.sha;
+  const github = { token: env.githubToken, apiBase: env.githubSyncApiUrl };
+  await Promise.all([
+    loadSnapshotInCell(cell, repoId, baseSha, github),
+    loadSnapshotInCell(cell, repoId, pr.head.sha, github),
+  ]);
+  const diff = await diffInCell(cell, repoId, baseSha, pr.head.sha);
+  if (!diff.trim()) throw new Error("the pull request has no changes against its merge base");
   return {
     headSha: pr.head.sha,
+    baseSha,
     intent: {
       title: pr.title,
-      body: (pr.body ?? "").slice(0, BODY_CHARS),
+      body: cut(pr.body ?? "", BODY_CHARS),
       author: pr.user?.login ?? "",
       headRef: pr.head.ref,
       baseRef: pr.base.ref,
@@ -186,7 +200,11 @@ async function driveReview(
     if (!row.provider_id) throw new Error("no provider chosen");
     const provider = await (deps.provider ?? resolveProvider)(row.provider_id);
     if (!provider) throw new Error("the provider has no key; set one in System → Providers");
-    const snapshot = await (deps.fetchSnapshot ?? fetchPullSnapshot)(row.repo_id, pull.number);
+    const snapshot = await (deps.fetchSnapshot ?? fetchPullSnapshot)(
+      row.repo_id,
+      pull.number,
+      cell,
+    );
     const allFiles = splitPatch(snapshot.diff).map((f) => f.path);
     // The patch is stored now so the review screen can show diffs under the skeleton.
     await sql`insert into private.review_patch (review_id, patch) values (${row.id}, ${snapshot.diff})

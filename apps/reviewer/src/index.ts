@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { runNarrative, runSkeleton, type NarrativeBody, type SkeletonBody } from "./review.ts";
 import { snapshotClient, type SnapshotClient } from "./agent.ts";
+import { buildPatch, type Manifest } from "./diff.ts";
 import { tracingFor } from "./otel.ts";
 import { RepoSnapshot, type SnapshotStats } from "./snapshot.ts";
 import { sqlAgentStore } from "./state.ts";
@@ -14,6 +15,7 @@ export { RepoSnapshot };
  *   POST /runs/{id}/narrative              write one step, with repository tools (in parallel)
  * A stage answers {status:"running"} when it pauses inside the request's time budget; the API
  * posts the same body again and the cell resumes the stored conversation.
+ *   GET  /diff/{owner}/{repo}/{base}...{head}   the unified diff between two loaded snapshots
  *   GET  /repos/{owner}/{repo}/stats       what this repository's cells hold, for the settings page
  * One ReviewRun cell per review, one RepoSnapshot per commit, one RepoIndex per repository.
  */
@@ -27,7 +29,9 @@ export interface Env {
 }
 
 const RUN = /^\/runs\/([A-Za-z0-9_-]{1,64})\/(skeleton|narrative)$/;
-const SNAPSHOT = /^\/snapshots\/([\w.-]+)\/([\w.-]+)\/([0-9a-f]{7,40})(?:\/(file|list|grep))?$/;
+const SNAPSHOT =
+  /^\/snapshots\/([\w.-]+)\/([\w.-]+)\/([0-9a-f]{7,40})(?:\/(file|list|grep|manifest|texts))?$/;
+const DIFF = /^\/diff\/([\w.-]+)\/([\w.-]+)\/([0-9a-f]{7,40})\.\.\.([0-9a-f]{7,40})$/;
 const REPO = /^\/repos\/([\w.-]+)\/([\w.-]+)\/stats$/;
 
 export default {
@@ -43,6 +47,8 @@ export default {
       const name = `${m[1]}/${m[2]}@${m[3]}`;
       return env.REPO_SNAPSHOT.get(env.REPO_SNAPSHOT.idFromName(name)).fetch(request);
     }
+    m = DIFF.exec(url.pathname);
+    if (m) return diffSnapshots(env, m[1]!, m[2]!, m[3]!, m[4]!);
     m = REPO.exec(url.pathname);
     if (m) {
       const name = `${m[1]}/${m[2]}`;
@@ -51,6 +57,63 @@ export default {
     return Response.json({ error: "not found" }, { status: 404 });
   },
 } satisfies ExportedHandler<Env>;
+
+/**
+ * The diff between two snapshots that are already loaded, as git unified text. GitHub will not
+ * serve a pull request diff past 300 files or 20,000 lines; the cell has both trees, so it
+ * builds the diff itself from the manifests and the changed files' text.
+ */
+async function diffSnapshots(
+  env: Env,
+  owner: string,
+  repo: string,
+  base: string,
+  head: string,
+): Promise<Response> {
+  const stub = (sha: string) =>
+    env.REPO_SNAPSHOT.get(env.REPO_SNAPSHOT.idFromName(`${owner}/${repo}@${sha}`));
+  const root = (sha: string) => `http://snapshot/snapshots/${owner}/${repo}/${sha}`;
+  const manifestOf = async (sha: string): Promise<Manifest> => {
+    const stats = (await (await stub(sha).fetch(root(sha))).json()) as {
+      status?: string;
+      error?: string | null;
+    };
+    if (stats.status !== "ready")
+      throw new Error(
+        `snapshot ${sha.slice(0, 7)} is ${stats.status ?? "missing"}${stats.error ? `: ${stats.error}` : ""}`,
+      );
+    const m = (await (await stub(sha).fetch(`${root(sha)}/manifest`)).json()) as {
+      files: [string, { size: number; hash: string }][];
+      skipped: [string, { size: number; reason: string }][];
+    };
+    return { files: new Map(m.files), skipped: new Map(m.skipped) };
+  };
+  try {
+    const [baseManifest, headManifest] = await Promise.all([manifestOf(base), manifestOf(head)]);
+    const t0 = Date.now();
+    const { patch, changes } = await buildPatch(baseManifest, headManifest, async (side, paths) => {
+      if (paths.length === 0) return new Map();
+      const sha = side === "base" ? base : head;
+      const res = await stub(sha).fetch(`${root(sha)}/texts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ paths }),
+      });
+      return new Map(Object.entries((await res.json()) as Record<string, string>));
+    });
+    console.log(
+      `[diff] ${owner}/${repo} ${base.slice(0, 7)}...${head.slice(0, 7)}: ${changes.length} files, ${patch.length} chars, ${Date.now() - t0} ms`,
+    );
+    return new Response(patch, {
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "x-changed-files": String(changes.length),
+      },
+    });
+  } catch (e) {
+    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status: 502 });
+  }
+}
 
 interface RunRecord {
   status: "running" | "ready" | "failed";
