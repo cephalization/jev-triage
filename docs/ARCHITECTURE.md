@@ -179,7 +179,11 @@ configured. A per-repo `budget_tokens` stops the worker when reached.
 ## Guardrails
 
 - Secrets and the TypeSafe SDK live only in `apps/api`. Provider keys are sealed at rest and
-  reach the reviewer cell only inside a request; the cell never stores them.
+  reach the reviewer cell only inside a request; the cell never stores them. The API refuses
+  to start with an off-machine cell and no `REVIEWER_TOKEN`.
+- Every route that spends or destroys something needs a session: sync and the worker poke
+  need a signed-in user (sync is rate limited per person), deleting a repository needs an
+  admin. Browsers may call the API only from `APP_URL`.
 - One in-flight request per repo; triggers during flight set a flag, never enqueue.
 - Guided reviews never regenerate on their own: a stale review warns and offers Regenerate.
   Generation is rate limited per person and refused once the repo's review token budget is

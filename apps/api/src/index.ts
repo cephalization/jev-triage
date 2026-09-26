@@ -1,6 +1,9 @@
 import { badHeaderChar } from "./providers/catalog.ts";
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import type { ZeroContext } from "@triage/schema";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { z } from "zod";
@@ -44,7 +47,9 @@ const worker = new ClassifierWorker(systemOne);
 const poke = (repoId: string, reason: string) => worker.poke(repoId, reason);
 
 const app = new Hono();
-app.use("/api/*", cors());
+// Only the app's own origin may call the API from a browser. Server-to-server callers
+// (zero-cache, the reviewer cell) send no Origin header and are unaffected.
+app.use("/api/*", cors({ origin: env.appUrl }));
 app.route("/", zeroRoutes(poke));
 
 app.get("/api/health", async (c) => {
@@ -53,6 +58,8 @@ app.get("/api/health", async (c) => {
   return c.json({
     ok: true,
     now,
+    /** Where this deployment's zero-cache is for browsers; the web app reads it at boot. */
+    zeroCacheUrl: env.zeroCacheUrl,
     typesafe: env.typesafeKey !== null,
     github: env.githubToken !== null,
     auth: {
@@ -422,7 +429,18 @@ const syncBody = z.object({
   /** Max issues to keep (testing knob; default 100). */
   limit: z.number().int().min(1).max(5000).optional(),
 });
+/** Every sync spends GitHub quota and, once classified, TypeSafe tokens: a handful per person per ten minutes. */
+const syncLimiter = new RateLimiter(20, 10 * 60_000);
+
 app.post("/api/sync", async (c) => {
+  const ctx = await contextFromRequest(c.req.raw);
+  if (!ctx) return c.json({ error: "sign in first" }, 401);
+  const gate = syncLimiter.take(ctx.userID);
+  if (!gate.ok)
+    return c.json(
+      { error: `slow down: try again in ${Math.ceil(gate.retryAfterMs / 1000)} s` },
+      429,
+    );
   const parsed = syncBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "owner and name required" }, 400);
   const { owner, name, paused, limit } = parsed.data;
@@ -441,21 +459,49 @@ app.post("/api/sync", async (c) => {
 });
 
 app.post("/api/classify/poke", async (c) => {
+  if (!(await contextFromRequest(c.req.raw))) return c.json({ error: "sign in first" }, 401);
   const parsed = z.object({ repoId: z.string() }).safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "repoId required" }, 400);
   poke(parsed.data.repoId, "manual");
   return c.json({ ok: true });
 });
 
+/** Drops a repository and every row under it, history included: admins only. */
 app.delete("/api/repo/:owner/:name", async (c) => {
+  if (!(await requireAdmin(c))) return c.json({ error: "admins only" }, 403);
   const id = `${c.req.param("owner")}/${c.req.param("name")}`;
   await sql`delete from repo where id = ${id}`;
   return c.json({ ok: true });
 });
 
+// ---- The web app, on the same origin as the API, when a build is configured ------------
+
+if (env.webDist) {
+  const index = await readFile(path.join(env.webDist, "index.html"), "utf8");
+  app.use(
+    "*",
+    serveStatic({
+      root: env.webDist,
+      onFound: (p, c) => {
+        // Vite names bundles by content hash, so they can be cached for good; the shell that
+        // names them must always be fresh.
+        if (p.includes(`${path.sep}assets${path.sep}`))
+          c.header("cache-control", "public, max-age=31536000, immutable");
+        else if (p.endsWith("index.html")) c.header("cache-control", "no-cache");
+      },
+    }),
+  );
+  // Client-side routes: anything that is not a file or the API gets the app shell.
+  app.get("*", (c) =>
+    c.req.path.startsWith("/api/")
+      ? c.notFound()
+      : c.html(index, 200, { "cache-control": "no-cache" }),
+  );
+}
+
 serve({ fetch: app.fetch, port: env.port }, (info) => {
   console.log(
-    `[api] listening on http://localhost:${info.port} (typesafe ${env.typesafeKey ? "on" : "OFF"}, github token ${env.githubToken ? "on" : "off"})`,
+    `[api] listening on http://localhost:${info.port} (typesafe ${env.typesafeKey ? "on" : "OFF"}, github token ${env.githubToken ? "on" : "off"}, app ${env.appUrl}, zero ${env.zeroCacheUrl}${env.webDist ? ", serving the web app" : ""})`,
   );
   void (async () => {
     await recoverOnBoot();

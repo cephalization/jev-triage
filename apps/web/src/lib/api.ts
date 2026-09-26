@@ -21,20 +21,36 @@ export function costOf(input: number, output: number, prices: Prices | null): st
   return `$${((input * prices.inputPerMTok + output * prices.outputPerMTok) / 1_000_000).toFixed(4)}`;
 }
 
+/** Deployment facts the server knows and a static build cannot: where zero-cache is. */
+export interface ServerConfig {
+  zeroCacheUrl: string;
+}
+
+/** A build-time override for a web app hosted away from its API; otherwise the dev default. */
+const ZERO_FALLBACK =
+  (import.meta.env.VITE_ZERO_CACHE_URL as string | undefined) ?? "http://localhost:4848";
+
+let config: Promise<ServerConfig> | null = null;
+
+/** Asked once per page load, before the first Zero connection. */
+export function fetchConfig(): Promise<ServerConfig> {
+  config ??= fetch("/api/health")
+    .then((r) => r.json())
+    .then((h: { zeroCacheUrl?: string }) => ({ zeroCacheUrl: h.zeroCacheUrl ?? ZERO_FALLBACK }))
+    .catch(() => ({ zeroCacheUrl: ZERO_FALLBACK }));
+  return config;
+}
+
 /** Fire-and-forget: the server answers 202 and progress streams through the repo row. */
 export async function startSync(
+  token: string,
   owner: string,
   name: string,
   opts: { paused?: boolean; limit?: number } = {},
 ): Promise<string | null> {
   try {
-    const res = await fetch("/api/sync", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ owner, name, ...opts }),
-    });
-    const data = (await res.json()) as { error?: string };
-    return res.ok ? null : (data.error ?? `sync failed (${res.status})`);
+    await apiJson(token, "/api/sync", { method: "POST", body: { owner, name, ...opts } });
+    return null;
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -82,10 +98,9 @@ export async function fetchReviewPatch(token: string, reviewId: string): Promise
   return res.text();
 }
 
-export function pokeWorker(repoId: string) {
-  return fetch("/api/classify/poke", {
+export function pokeWorker(token: string, repoId: string) {
+  return apiJson<{ ok: true }>(token, "/api/classify/poke", {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repoId }),
-  });
+    body: { repoId },
+  }).catch(() => undefined);
 }

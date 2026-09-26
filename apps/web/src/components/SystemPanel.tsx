@@ -458,7 +458,11 @@ export function SystemPanel({
         )}
         {repo && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" onClick={() => void pokeWorker(repo.id)}>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void pokeWorker(session.token, repo.id)}
+            >
               Poke worker
             </Button>
             <Button

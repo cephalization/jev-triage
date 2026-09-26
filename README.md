@@ -100,6 +100,10 @@ Everything lives in `.env`, which is never committed. See `.env.example` for the
 | `ADMIN_GITHUB_LOGINS`            | Comma-separated GitHub logins that are always admins.          |
 | `GITHUB_CLIENT_ID` / `_SECRET`   | The GitHub OAuth app for "Continue with GitHub".               |
 | `APP_URL`                        | Where the browser reaches the app; builds the OAuth callback.  |
+| `ZERO_CACHE_URL`                 | Where the browser reaches zero-cache; handed to the web app.   |
+| `WEB_DIST`                       | A built web app for the API to serve; unset in development.    |
+| `REVIEWER_TOKEN`                 | Shared secret with the reviewer cell; required off-machine.    |
+| `PHOENIX_API_KEY`                | For a Phoenix with authentication on.                          |
 | `GITHUB_API_URL` / `_OAUTH_URL`  | Default github.com; point both at an emulator for offline use. |
 | `TYPESAFE_PRICE_INPUT_PER_MTOK`  | Price per million input tokens, shown as spend. Preset.        |
 | `TYPESAFE_PRICE_OUTPUT_PER_MTOK` | Price per million output tokens. Preset.                       |
@@ -136,6 +140,13 @@ and tested with canned answers, so no network is needed for the test suite.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how sync, classification, feedback and the
 triage queue fit together, and `CLAUDE.md` for the working rules if you use a coding agent.
+
+## Deploying
+
+`apps/api/Dockerfile` is the API with the web app built in, on one origin; `apps/reviewer/Dockerfile`
+is the reviewer cell; zero-cache runs from the `rocicorp/zero` image. Every address comes from
+the environment with local defaults, and on Railway the platform's own variables fill them in.
+[docs/DEPLOY.md](docs/DEPLOY.md) walks through a Railway project service by service.
 
 ## Traces
 

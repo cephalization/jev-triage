@@ -19,6 +19,11 @@ import { env } from "../env.ts";
 
 let provider: NodeTracerProvider | null = null;
 
+/** What a Phoenix with authentication on expects on every OTLP request; empty when it is off. */
+const phoenixHeaders: Record<string, string> = env.phoenixApiKey
+  ? { authorization: `Bearer ${env.phoenixApiKey}` }
+  : {};
+
 if (env.phoenixEndpoint) {
   provider = new NodeTracerProvider({
     resource: resourceFromAttributes({
@@ -27,7 +32,10 @@ if (env.phoenixEndpoint) {
     }),
     spanProcessors: [
       new BatchSpanProcessor({
-        exporter: new OTLPTraceExporter({ url: `${env.phoenixEndpoint}/v1/traces` }),
+        exporter: new OTLPTraceExporter({
+          url: `${env.phoenixEndpoint}/v1/traces`,
+          headers: phoenixHeaders,
+        }),
         // A review is seconds long and people watch Phoenix while it runs; ship promptly.
         scheduledDelayMillis: 500,
       }),
@@ -44,7 +52,7 @@ export const tracer = new OITracer({ tracer: trace.getTracer("typeful-api") });
 
 /** The collector the cell should report to, as the cell sees it, or null when tracing is off. */
 export const traceTarget = env.phoenixEndpoint
-  ? { endpoint: env.reviewCellPhoenixUrl, project: env.phoenixProject }
+  ? { endpoint: env.reviewCellPhoenixUrl, project: env.phoenixProject, headers: phoenixHeaders }
   : null;
 
 /** Headers carrying the active span as W3C `traceparent`, for a request to the cell. */

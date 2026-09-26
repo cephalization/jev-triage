@@ -7,10 +7,14 @@
 const PROVIDER = "typesafe";
 const NAME_PATTERN = "^jev";
 
-async function gql(endpoint, query, variables = {}) {
+/** @param {string | null} [apiKey] for a Phoenix with authentication on */
+async function gql(endpoint, query, variables = {}, apiKey = null) {
   const res = await fetch(`${endpoint}/graphql`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+    },
     body: JSON.stringify({ query, variables }),
     signal: AbortSignal.timeout(10_000),
   });
@@ -20,7 +24,7 @@ async function gql(endpoint, query, variables = {}) {
   return body.data;
 }
 
-async function hasTypesafeModel(endpoint) {
+async function hasTypesafeModel(endpoint, apiKey) {
   let after = null;
   for (;;) {
     const data = await gql(
@@ -28,6 +32,7 @@ async function hasTypesafeModel(endpoint) {
       `query ($after: String) { generativeModels(first: 200, after: $after) {
         edges { node { provider namePattern } } pageInfo { hasNextPage endCursor } } }`,
       { after },
+      apiKey,
     );
     const page = data.generativeModels;
     if (page.edges.some((e) => e.node.provider === PROVIDER)) return true;
@@ -39,12 +44,13 @@ async function hasTypesafeModel(endpoint) {
 /** Returns what happened, for the caller's log line. */
 export async function seedPhoenixModel(env) {
   const endpoint = env.PHOENIX_COLLECTOR_ENDPOINT?.replace(/\/+$/, "");
+  const apiKey = env.PHOENIX_API_KEY?.trim() || null;
   const input = Number(env.TYPESAFE_PRICE_INPUT_PER_MTOK);
   const output = Number(env.TYPESAFE_PRICE_OUTPUT_PER_MTOK);
   if (!endpoint) return "no Phoenix endpoint";
   if (!Number.isFinite(input) || !Number.isFinite(output))
     return "TYPESAFE_PRICE_INPUT_PER_MTOK and TYPESAFE_PRICE_OUTPUT_PER_MTOK are not both set";
-  if (await hasTypesafeModel(endpoint)) return "jev already priced";
+  if (await hasTypesafeModel(endpoint, apiKey)) return "jev already priced";
   await gql(
     endpoint,
     `mutation ($input: CreateModelMutationInput!) { createModel(input: $input) { model { id } } }`,
@@ -60,6 +66,7 @@ export async function seedPhoenixModel(env) {
         ],
       },
     },
+    apiKey,
   );
   return `priced jev at $${input}/M in, $${output}/M out`;
 }

@@ -13,12 +13,10 @@ import {
   verifySession,
   type Session,
 } from "./lib/auth.ts";
+import { fetchConfig, type ServerConfig } from "./lib/api.ts";
 import { applyTheme, loadTheme } from "./lib/theme.ts";
 import { makeRouter } from "./router.tsx";
 import "./index.css";
-
-const CACHE_URL =
-  (import.meta.env.VITE_ZERO_CACHE_URL as string | undefined) ?? "http://localhost:4848";
 
 applyTheme(loadTheme());
 
@@ -35,6 +33,11 @@ const fragment = takeAuthFragment();
 function Root() {
   const [session, setSession] = useState<Session | null>(() => loadSession());
   const [booting, setBooting] = useState(!!fragment.token);
+  // Where zero-cache is comes from the server, so one build serves every deployment.
+  const [config, setConfig] = useState<ServerConfig | null>(null);
+  useEffect(() => {
+    void fetchConfig().then(setConfig);
+  }, []);
   const logout = useCallback(() => {
     saveSession(null);
     setSession(null);
@@ -69,9 +72,10 @@ function Root() {
         deniedLogin={fragment.error === "not_invited" ? (fragment.login ?? null) : null}
       />
     );
+  if (!config) return null;
   return (
     <ZeroProvider
-      cacheURL={CACHE_URL}
+      cacheURL={config.zeroCacheUrl}
       userID={session.user.userID}
       auth={session.token}
       context={session.user}

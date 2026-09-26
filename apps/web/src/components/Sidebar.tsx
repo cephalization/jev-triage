@@ -108,7 +108,7 @@ export function Sidebar({
     }
     setError(null);
     onSelectRepo(`${parsed.owner}/${parsed.name}`);
-    const err = await startSync(parsed.owner, parsed.name);
+    const err = await startSync(session.token, parsed.owner, parsed.name);
     setError(err);
     return !err;
   }
