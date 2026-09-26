@@ -16,7 +16,7 @@ import { syncPulls } from "./pulls.ts";
  *
  *  - closed issues are never fetched; rows that close stay as history;
  *  - there is no cap: every open issue is kept;
- *  - pull requests (see pulls.ts) follow the issue walk.
+ *  - pull requests (see pulls.ts) are walked at the same time.
  *
  * Tuned for speed; only GitHub's rate limits hold it back. Recalibrate the constants here if
  * secondary limits show up.
@@ -178,27 +178,45 @@ async function runSync(
 
   try {
     await syncLabels(octokit, owner, name, repoId);
-    let pullsDone = false;
-    const pullsOnce = async () => {
-      if (pullsDone) return;
-      pullsDone = true;
+    // The issue pages and the pull walks share one status line and one page counter.
+    const status = { issues: "", pulls: "" };
+    let pullPages = 0;
+    const report = (fields: Record<string, unknown>) =>
+      progress(repoId, {
+        ...fields,
+        sync_pages: pages + pullPages,
+        sync_message: [status.issues, status.pulls].filter(Boolean).join(" · "),
+      });
+    const syncPullsToo = async () => {
       if (!env.githubToken) {
-        await progress(repoId, { sync_message: "pull requests need GITHUB_TOKEN; skipped" });
+        status.pulls = "pull requests need GITHUB_TOKEN; skipped";
+        await report({});
         return;
       }
       try {
-        const r = await syncPulls(octokit, owner, name, repoId, (f) => progress(repoId, f), {
-          onPage: hooks.onPage,
-        });
+        const r = await syncPulls(
+          octokit,
+          owner,
+          name,
+          repoId,
+          ({ sync_phase: _phase, sync_pages, sync_message, ...rest }) => {
+            if (typeof sync_pages === "number") pullPages = sync_pages;
+            if (typeof sync_message === "string") status.pulls = sync_message;
+            return report(rest);
+          },
+          { onPage: hooks.onPage },
+        );
         console.log(
           `[sync] ${repoId} pulls: ${r.open} open, ${r.history} history, ${r.pages} pages`,
         );
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.error(`[sync] ${repoId} pulls failed: ${message}`);
-        await progress(repoId, { sync_message: `pull requests failed: ${message}` });
+        status.pulls = `pull requests failed: ${message}`;
+        await report({});
       }
     };
+    const pulls = syncPullsToo();
 
     const seen = new Set<string>();
     // Pages are fetched concurrently and written in arrival order through one chain, so the
@@ -233,13 +251,12 @@ async function runSync(
           stored += toStore.length;
           hooks.onPage?.(repoId, toStore.length);
         }
-        await progress(repoId, {
+        status.issues = `fetching open issues · page ${pages} of ${Math.max(expectedPages, pages)}`;
+        await report({
           sync_phase: "issues",
           sync_fetched: stored,
-          sync_pages: pages,
           sync_rate_remaining: remaining,
           last_synced_at: new Date(),
-          sync_message: `fetching open issues · page ${pages} of ${Math.max(expectedPages, pages)}`,
         });
         console.log(
           `[sync] ${repoId} issues page ${page}: stored ${toStore.length} (rate ${remaining})`,
@@ -258,10 +275,12 @@ async function runSync(
       where repo_id = ${repoId} and state = 'open' and id <> all(${sql.array([...seen])})`;
     if (closed.count > 0)
       console.log(`[sync] ${repoId}: ${closed.count} issues closed since the last sync`);
-    await pullsOnce();
+    status.issues = "issues up to date";
+    await report({});
+    await pulls;
 
     await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now(),
-      sync_phase = ${finalPhase}, sync_message = 'up to date'
+      sync_pages = ${pages + pullPages}, sync_phase = ${finalPhase}, sync_message = 'up to date'
       where id = ${repoId}`;
     await sql`update run set finished_at = now(), status = 'ok', issues = ${stored}, latency_ms = ${Date.now() - started} where id = ${runId}`;
     return { repoId, pages, issues: stored, skippedPulls, phase: finalPhase };

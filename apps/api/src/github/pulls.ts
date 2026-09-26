@@ -4,21 +4,23 @@ import { sql } from "../db.ts";
 
 /**
  * Pull request sync over GraphQL (one query returns files, reviews and requested reviewers,
- * which REST spreads over three endpoints). Two walks, both newest-updated first:
+ * which REST spreads over three endpoints). Three walks at once, each newest-updated first:
  *  - every open pull: the ones to review;
- *  - merged/closed pulls, up to HISTORY_LIMIT: who reviewed what, folded into the `reviewer`
- *    table after every page so the roster streams in. This is a separate path that feeds
- *    reviewer statistics only; it never limits how many open pulls are kept.
- * GraphQL pages are cursor-chained, so this walk cannot fan out like the issue walk; the page
- * size is the lever. Needs GITHUB_TOKEN (GraphQL is never anonymous); without it the phase is
- * skipped with a message.
+ *  - merged pulls and closed pulls, up to a limit each: who reviewed what, for the reviewer
+ *    roster. This is a separate path that feeds reviewer statistics only; it never limits how
+ *    many open pulls are kept.
+ * GitHub answers a page of 50 pulls in two to five seconds whatever the fields asked for, and
+ * a cursor walk cannot fan out, so the walks run concurrently and history is split by state to
+ * halve its critical path. Needs GITHUB_TOKEN (GraphQL is never anonymous); without it the
+ * phase is skipped with a message.
  */
 
 /** Pulls per page. Each carries up to 100 files, so 50 keeps a page well under GraphQL's node limit. */
 const PAGE = 50;
 const FILES_KEPT = 100;
-/** Merged and closed pulls walked for reviewer statistics. */
-const HISTORY_LIMIT = 300;
+/** Merged and closed pulls walked for reviewer statistics; merged ones carry most reviews. */
+const MERGED_HISTORY_LIMIT = 200;
+const CLOSED_HISTORY_LIMIT = 100;
 
 const QUERY = /* GraphQL */ `
   query Pulls(
@@ -187,13 +189,21 @@ export async function syncPulls(
   hooks: PullSyncHooks = {},
 ): Promise<PullSyncResult> {
   let pages = 0;
+  // One status line for the three walks, so the sidebar does not flicker between them.
+  const counts = { open: 0, history: 0 };
+  const report = (remaining: number) =>
+    progress({
+      sync_phase: "pulls",
+      sync_pages: pages,
+      sync_rate_remaining: remaining,
+      sync_message: `fetching pull requests · ${counts.open} open · ${counts.history} reviewed`,
+    });
 
   const walk = async (
     states: string[],
     limit: number,
     phase: string,
-    message: string,
-    delayMs: number,
+    tally: keyof typeof counts,
   ): Promise<{ seen: Set<string>; complete: boolean; oldest: string | null }> => {
     const seen = new Set<string>();
     let after: string | null = null;
@@ -215,14 +225,10 @@ export async function syncPulls(
         await upsertPulls(repoId, nodes);
         for (const n of nodes) seen.add(n.id);
         oldest = nodes[nodes.length - 1]!.updatedAt;
+        counts[tally] += nodes.length;
         hooks.onPage?.(repoId, nodes.length);
       }
-      await progress({
-        sync_phase: phase,
-        sync_pages: pages,
-        sync_rate_remaining: data.rateLimit.remaining,
-        sync_message: `${message} · ${seen.size} stored`,
-      });
+      await report(data.rateLimit.remaining);
       console.log(
         `[sync] ${repoId} ${phase}: ${nodes.length} pulls (total ${seen.size}/${limit}, graphql ${data.rateLimit.remaining} left)`,
       );
@@ -236,14 +242,16 @@ export async function syncPulls(
         const wait = Math.max(0, Date.parse(data.rateLimit.resetAt) - Date.now()) + 1000;
         await progress({ sync_message: `rate limited · resuming in ${Math.round(wait / 1000)}s` });
         await new Promise((r) => setTimeout(r, wait));
-      } else if (delayMs > 0) {
-        await new Promise((r) => setTimeout(r, delayMs));
       }
     }
     return { seen, complete, oldest };
   };
 
-  const open = await walk(["OPEN"], Infinity, "pulls", "fetching open pull requests", 0);
+  const [open, merged, closed] = await Promise.all([
+    walk(["OPEN"], Infinity, "pulls", "open"),
+    walk(["MERGED"], MERGED_HISTORY_LIMIT, "pull-history", "history"),
+    walk(["CLOSED"], CLOSED_HISTORY_LIMIT, "pull-history", "history"),
+  ]);
   // Anything we thought was open and did not see again has closed or merged since.
   // When the walk was capped, only rows newer than the oldest seen can be judged.
   const seenIds = [...open.seen];
@@ -254,26 +262,14 @@ export async function syncPulls(
     await sql`update pull set state = 'closed' where repo_id = ${repoId} and state = 'open'
       and updated_at >= ${open.oldest} and id <> all(${sql.array(seenIds)})`;
   }
-  await refreshReviewers(repoId);
-
-  let history = 0;
-  {
-    const closed = await walk(
-      ["MERGED", "CLOSED"],
-      HISTORY_LIMIT,
-      "pull-history",
-      "fetching reviewed pull requests",
-      0,
-    );
-    history = closed.seen.size;
-    const roster = await refreshReviewers(repoId);
-    // Open pulls classified before the roster existed never got a reviewer question; re-ask.
-    if (roster > 0) {
-      const flagged =
-        await sql`update pull set reclassify = true where repo_id = ${repoId} and state = 'open'
-        and not reclassify and not exists (select 1 from classification c where c.pull_id = pull.id and c.kind = 'reviewer')`;
-      if (flagged.count > 0) hooks.onPage?.(repoId, flagged.count);
-    }
+  const history = merged.seen.size + closed.seen.size;
+  const roster = await refreshReviewers(repoId);
+  // Open pulls classified before the roster existed never got a reviewer question; re-ask.
+  if (roster > 0) {
+    const flagged =
+      await sql`update pull set reclassify = true where repo_id = ${repoId} and state = 'open'
+      and not reclassify and not exists (select 1 from classification c where c.pull_id = pull.id and c.kind = 'reviewer')`;
+    if (flagged.count > 0) hooks.onPage?.(repoId, flagged.count);
   }
   await sql`update repo set pull_synced_at = now() where id = ${repoId}`;
   return { open: open.seen.size, history, pages };

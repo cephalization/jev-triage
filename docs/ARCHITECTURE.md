@@ -60,11 +60,13 @@ sync looks at the whole open list, which is how closures are noticed: an issue s
 that no longer appears is marked closed and stays as history. There is no cap; every open
 issue is kept.
 
-With a `GITHUB_TOKEN`, a GraphQL walk fetches every open pull request (files, reviews,
-requested reviewers), fifty per page, and marks the ones that vanished as closed. Reviewer
-history is a separate path: a second walk over the 300 most recently updated merged and closed
-pulls that feeds reviewer statistics only. The reviewer roster is rebuilt in pure code after
-every page; bots and AI review accounts are excluded.
+With a `GITHUB_TOKEN`, GraphQL walks run alongside the issue pages: every open pull request
+(files, reviews, requested reviewers), fifty per page, with the ones that vanished marked
+closed, and, for reviewer history only, the 200 most recently updated merged pulls and the 100
+most recently updated closed ones as two more concurrent walks. GitHub answers a page of fifty
+pulls in two to five seconds whatever fields are asked for, and a cursor walk cannot fan out,
+so concurrency between walks is what keeps the pull phase short. The reviewer roster is rebuilt
+in pure code once the walks finish; bots and AI review accounts are excluded.
 
 The pipeline has no tuning knobs. It is set for speed (jev is cheap) and only GitHub's rate
 limits hold it back; the constants live at the top of `sync.ts`, `pulls.ts` and
