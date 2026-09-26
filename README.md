@@ -108,9 +108,9 @@ Everything lives in `.env`, which is never committed. See `.env.example` for the
 | `TYPESAFE_PRICE_INPUT_PER_MTOK`  | Price per million input tokens, shown as spend. Preset.        |
 | `TYPESAFE_PRICE_OUTPUT_PER_MTOK` | Price per million output tokens. Preset.                       |
 
-Per-repository knobs live in the System view and are shared by everyone: pause, batch size,
-cadence, sync caps, and a token budget that stops the worker when reached. Defaults are
-deliberately small (100 issues) so trying a large repository costs cents, not dollars.
+There are no sync or classification knobs: every open issue and pull request is fetched and
+classified as fast as GitHub and TypeSafe allow, which for a thousand issues is well under a
+minute and costs cents. Pausing classification per repository is the one switch, under System.
 
 ## Layout
 

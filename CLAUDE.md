@@ -13,7 +13,8 @@ the data model, flows and question design. Read both before changing behaviour.
   thresholds live in `packages/triage/src/policy.ts`, never inside a question.
 - Changing a question's meaning, or adding or removing a family, means bumping
   `QUESTIONS_VERSION`. Old classification rows are history and are never edited.
-- One in-flight TypeSafe request per repository. Log usage on every request and write it to the
+- At most `MAX_IN_FLIGHT` TypeSafe requests per repository, each on a batch it claimed by setting
+  `classifying`. Log usage on every request and write it to the
   `run` table.
 - New state must stream through Zero rows so every tab agrees; never block the list on a request.
 - Everything runs through Vite+: `vp install`, `vp run dev`, `vp check --fix`, `vp run -r test`,

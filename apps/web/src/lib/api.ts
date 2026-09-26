@@ -46,7 +46,7 @@ export async function startSync(
   token: string,
   owner: string,
   name: string,
-  opts: { paused?: boolean; limit?: number } = {},
+  opts: { paused?: boolean } = {},
 ): Promise<string | null> {
   try {
     await apiJson(token, "/api/sync", { method: "POST", body: { owner, name, ...opts } });

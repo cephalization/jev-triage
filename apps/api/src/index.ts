@@ -424,10 +424,8 @@ app.get("/api/auth/me", async (c) => {
 const syncBody = z.object({
   owner: z.string().trim().min(1),
   name: z.string().trim().min(1),
-  /** Create the repo with classification paused (cost control for big repos). */
+  /** Create the repo with classification paused. */
   paused: z.boolean().optional(),
-  /** Max issues to keep (testing knob; default 100). */
-  limit: z.number().int().min(1).max(5000).optional(),
 });
 /** Every sync spends GitHub quota and, once classified, TypeSafe tokens: a handful per person per ten minutes. */
 const syncLimiter = new RateLimiter(20, 10 * 60_000);
@@ -443,11 +441,11 @@ app.post("/api/sync", async (c) => {
     );
   const parsed = syncBody.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return c.json({ error: "owner and name required" }, 400);
-  const { owner, name, paused, limit } = parsed.data;
+  const { owner, name, paused } = parsed.data;
   const repoId = `${owner}/${name}`;
   if (isSyncing(repoId)) return c.json({ ok: true, repoId, status: "already running" }, 202);
   // Fire and forget: progress streams through the repo row; classification starts per page.
-  syncRepo(owner, name, { onPage: (id) => poke(id, "sync page") }, { paused, limit })
+  syncRepo(owner, name, { onPage: (id) => poke(id, "sync page") }, { paused })
     .then((r) => {
       console.log(
         `[sync] ${r.repoId} finished: ${r.issues} issues in ${r.pages} pages (${r.phase})`,

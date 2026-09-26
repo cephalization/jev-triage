@@ -1,23 +1,33 @@
+import Bottleneck from "bottleneck";
 import { Octokit } from "octokit";
 import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 import { syncPulls } from "./pulls.ts";
 
 /**
- * GitHub → Postgres sync: open issues only, newest first.
+ * GitHub → Postgres sync: open issues only, as fast as the API allows.
  *
- * Every sync walks `issues.listForRepo` for open issues sorted by `updated` descending, one
- * page per transaction, so the most recently touched issues land (and get classified) within
- * a second or two. The whole open list is looked at each time (a page holds 100), which is how
- * closures are noticed: an issue stored as open that no longer appears has closed since.
+ * Every sync lists the repository's open issues sorted by `updated` descending. The page
+ * count is known up front (GitHub's open_issues_count includes pull requests, and so does the
+ * listing), so pages are fetched several at a time and written as they arrive, each page in
+ * its own transaction, so the most recently touched issues land (and get classified) within
+ * a second or two. The whole open list is looked at each time, which is how closures are
+ * noticed: an issue stored as open that no longer appears has closed since.
  *
- *  - `repo.sync_limit` caps how many open issues are kept; the most recently updated win, and
- *    the walk stops at the cap because nothing older could be stored;
  *  - closed issues are never fetched; rows that close stay as history;
+ *  - there is no cap: every open issue is kept;
  *  - pull requests (see pulls.ts) follow the issue walk.
+ *
+ * Tuned for speed; only GitHub's rate limits hold it back. Recalibrate the constants here if
+ * secondary limits show up.
  *
  * Progress lives on the repo row (`sync_phase`, `sync_fetched`, ...) and streams to clients.
  */
+
+/** Issues per page: the API's maximum. */
+const PAGE = 100;
+/** Pages requested at once. GitHub's secondary limits start far above this. */
+const PAGE_CONCURRENCY = 6;
 
 type ThrottleOptions = { method: string; url: string };
 
@@ -39,6 +49,17 @@ export type SyncHooks = {
 /** No GitHub call may hang a sync: past this, the request fails and the sync reports it. */
 const GITHUB_REQUEST_TIMEOUT_MS = 60_000;
 
+/**
+ * The throttling plugin rates GraphQL like writes: one request per second, one at a time.
+ * Every GraphQL call here is a read (this app never writes to GitHub), so it gets a limiter
+ * without that floor; the plugin's own limits for REST reads and retries stay.
+ */
+const graphqlLimiter = new Bottleneck.Group({
+  id: "typeful-graphql",
+  maxConcurrent: 2,
+  minTime: 0,
+});
+
 export function makeOctokit() {
   return new Octokit({
     auth: env.githubToken ?? undefined,
@@ -51,6 +72,7 @@ export function makeOctokit() {
       },
     },
     throttle: {
+      write: graphqlLimiter,
       onRateLimit: (
         retryAfter: number,
         options: ThrottleOptions,
@@ -84,7 +106,7 @@ export function syncRepo(
   owner: string,
   name: string,
   hooks: SyncHooks = {},
-  opts: { paused?: boolean; limit?: number } = {},
+  opts: { paused?: boolean } = {},
 ): Promise<SyncResult> {
   const id = `${owner}/${name}`;
   const existing = inFlight.get(id);
@@ -131,7 +153,7 @@ async function runSync(
   owner: string,
   name: string,
   hooks: SyncHooks,
-  opts: { paused?: boolean; limit?: number },
+  opts: { paused?: boolean },
 ): Promise<SyncResult> {
   const repoId = `${owner}/${name}`;
   const octokit = makeOctokit();
@@ -144,10 +166,10 @@ async function runSync(
 
   const { data: meta } = await octokit.rest.repos.get({ owner, repo: name });
   await sql`
-    insert into repo (id, owner, name, description, default_branch, open_issues, sync_status, sync_error, paused, sync_limit,
+    insert into repo (id, owner, name, description, default_branch, open_issues, sync_status, sync_error, paused,
       sync_phase, sync_fetched, sync_pages, sync_started_at, sync_message)
     values (${repoId}, ${owner}, ${name}, ${meta.description ?? null}, ${meta.default_branch}, ${meta.open_issues_count}, 'running', null,
-      ${opts.paused ?? false}, ${opts.limit ?? 100}, 'issues', 0, 0, now(), 'fetching open issues')
+      ${opts.paused ?? false}, 'issues', 0, 0, now(), 'fetching open issues')
     on conflict (id) do update set description = excluded.description, default_branch = excluded.default_branch,
       open_issues = excluded.open_issues, sync_status = 'running', sync_error = null, sync_phase = 'issues',
       sync_fetched = 0, sync_pages = 0, sync_started_at = now(), sync_message = 'fetching open issues'`;
@@ -155,21 +177,7 @@ async function runSync(
   await sql`insert into run (id, repo_id, kind, status) values (${runId}, ${repoId}, 'sync', 'running')`;
 
   try {
-    const [repo] = await sql<{ sync_limit: number }[]>`
-      select sync_limit from repo where id = ${repoId}`;
-    const limit = repo!.sync_limit;
-
     await syncLabels(octokit, owner, name, repoId);
-    const existing = new Set(
-      (await sql<{ id: string }[]>`select id from issue where repo_id = ${repoId}`).map(
-        (r) => r.id,
-      ),
-    );
-    // The cap counts open issues; closed rows stay as history and cost nothing to keep.
-    const [openRow] = await sql<{ open: number }[]>`
-      select count(*)::int as open from issue where repo_id = ${repoId} and state = 'open'`;
-    let total = openRow?.open ?? 0;
-    let capped = false;
     let pullsDone = false;
     const pullsOnce = async () => {
       if (pullsDone) return;
@@ -192,92 +200,68 @@ async function runSync(
       }
     };
 
-    const iterator = octokit.paginate.iterator(octokit.rest.issues.listForRepo, {
-      owner,
-      repo: name,
-      state: "open",
-      sort: "updated",
-      direction: "desc",
-      per_page: 100,
-    });
-
     const seen = new Set<string>();
-    let oldestSeen: string | null = null;
-    let complete = true;
-    for await (const page of iterator) {
-      pages += 1;
-      const remaining = Number(page.headers["x-ratelimit-remaining"] ?? "1000");
-      const reset = Number(page.headers["x-ratelimit-reset"] ?? "0") * 1000;
+    // Pages are fetched concurrently and written in arrival order through one chain, so the
+    // label and issue upserts of different pages never contend.
+    let writes: Promise<void> = Promise.resolve();
+    const expectedPages = Math.ceil(meta.open_issues_count / PAGE);
+    const fetchPage = async (page: number): Promise<number> => {
+      const { data, headers } = await octokit.rest.issues.listForRepo({
+        owner,
+        repo: name,
+        state: "open",
+        sort: "updated",
+        direction: "desc",
+        per_page: PAGE,
+        page,
+      });
+      const items = data as IssueItem[];
       const toStore: IssueItem[] = [];
-      for (const raw of page.data as IssueItem[]) {
-        oldestSeen = raw.updated_at;
+      for (const raw of items) {
         if (raw.pull_request) {
           skippedPulls += 1;
           continue;
         }
         seen.add(raw.node_id);
-        const known = existing.has(raw.node_id);
-        if (!known && total >= limit) {
-          // The cap only limits new issues; updates to stored issues always apply.
-          capped = true;
-          continue;
-        }
         toStore.push(raw);
-        if (!known) {
-          existing.add(raw.node_id);
-          total += 1;
+      }
+      const remaining = Number(headers["x-ratelimit-remaining"] ?? "0");
+      writes = writes.then(async () => {
+        pages += 1;
+        if (toStore.length > 0) {
+          await upsertPage(repoId, toStore);
+          stored += toStore.length;
+          hooks.onPage?.(repoId, toStore.length);
         }
-      }
-
-      if (toStore.length > 0) {
-        await upsertPage(repoId, toStore);
-        stored += toStore.length;
-        hooks.onPage?.(repoId, toStore.length);
-      }
-      await progress(repoId, {
-        sync_phase: "issues",
-        sync_fetched: stored,
-        sync_pages: pages,
-        sync_rate_remaining: remaining,
-        last_synced_at: new Date(),
-        sync_message: `fetching open issues · page ${pages}`,
-      });
-      console.log(
-        `[sync] ${repoId} issues page ${pages}: stored ${toStore.length} (total ${total}/${limit}, rate ${remaining})`,
-      );
-
-      if (capped) {
-        // Nothing older could be stored, so the rest of the listing is not worth the requests.
-        finalPhase = "capped";
-        complete = false;
-        break;
-      }
-      if (remaining < 5 && reset > Date.now()) {
-        const wait = reset - Date.now() + 1000;
         await progress(repoId, {
-          sync_message: `rate limited · resuming in ${Math.round(wait / 1000)}s`,
+          sync_phase: "issues",
+          sync_fetched: stored,
+          sync_pages: pages,
+          sync_rate_remaining: remaining,
+          last_synced_at: new Date(),
+          sync_message: `fetching open issues · page ${pages} of ${Math.max(expectedPages, pages)}`,
         });
-        await new Promise((r) => setTimeout(r, wait));
-      }
-    }
+        console.log(
+          `[sync] ${repoId} issues page ${page}: stored ${toStore.length} (rate ${remaining})`,
+        );
+      });
+      return items.length;
+    };
+    await inParallel(expectedPages, PAGE_CONCURRENCY, fetchPage);
+    // Issues opened since the count was read push the oldest onto pages past the estimate.
+    for (let page = expectedPages + 1; (await fetchPage(page)) === PAGE; page += 1);
+    await writes;
 
-    // Anything stored as open and not seen again has closed since. When the walk was capped,
-    // only rows updated at least as recently as the oldest issue looked at can be judged.
-    const seenIds = [...seen];
-    const closed = complete
-      ? await sql`update issue set state = 'closed', closed_at = coalesce(closed_at, now())
-          where repo_id = ${repoId} and state = 'open' and id <> all(${sql.array(seenIds)})`
-      : oldestSeen
-        ? await sql`update issue set state = 'closed', closed_at = coalesce(closed_at, now())
-          where repo_id = ${repoId} and state = 'open' and updated_at >= ${oldestSeen}
-          and id <> all(${sql.array(seenIds)})`
-        : null;
-    if (closed && closed.count > 0)
+    // Anything stored as open and not seen again has closed since.
+    const closed =
+      await sql`update issue set state = 'closed', closed_at = coalesce(closed_at, now())
+      where repo_id = ${repoId} and state = 'open' and id <> all(${sql.array([...seen])})`;
+    if (closed.count > 0)
       console.log(`[sync] ${repoId}: ${closed.count} issues closed since the last sync`);
     await pullsOnce();
 
     await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now(),
-      sync_phase = ${finalPhase}, sync_message = ${finalPhase === "capped" ? `capped at ${limit} open issues` : "up to date"}
+      sync_phase = ${finalPhase}, sync_message = 'up to date'
       where id = ${repoId}`;
     await sql`update run set finished_at = now(), status = 'ok', issues = ${stored}, latency_ms = ${Date.now() - started} where id = ${runId}`;
     return { repoId, pages, issues: stored, skippedPulls, phase: finalPhase };
@@ -312,6 +296,19 @@ async function syncLabels(octokit: Octokit, owner: string, name: string, repoId:
       "description",
     )}
     on conflict (id) do update set name = excluded.name, color = excluded.color, description = excluded.description`;
+}
+
+/** Runs `fn(1..n)` with at most `limit` calls in flight; the first failure rejects the whole thing. */
+async function inParallel(n: number, limit: number, fn: (i: number) => Promise<unknown>) {
+  let next = 1;
+  const worker = async () => {
+    while (next <= n) {
+      const i = next;
+      next += 1;
+      await fn(i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, n) }, worker));
 }
 
 async function upsertPage(repoId: string, items: IssueItem[]) {

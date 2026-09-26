@@ -5,17 +5,20 @@ import { sql } from "../db.ts";
 /**
  * Pull request sync over GraphQL (one query returns files, reviews and requested reviewers,
  * which REST spreads over three endpoints). Two walks, both newest-updated first:
- *  - open pulls, up to `repo.pull_limit` (default 200): the ones to review;
- *  - merged/closed pulls, up to `repo.pull_history_limit` (default 300): who reviewed what,
- *    folded into the `reviewer` table after every page so the roster streams in. This is a
- *    separate path with its own limit: it feeds reviewer statistics only and never counts
- *    against `pull_limit`, which is about pulls still waiting for review.
- * Needs GITHUB_TOKEN (GraphQL is never anonymous); without it the phase is skipped with a message.
+ *  - every open pull: the ones to review;
+ *  - merged/closed pulls, up to HISTORY_LIMIT: who reviewed what, folded into the `reviewer`
+ *    table after every page so the roster streams in. This is a separate path that feeds
+ *    reviewer statistics only; it never limits how many open pulls are kept.
+ * GraphQL pages are cursor-chained, so this walk cannot fan out like the issue walk; the page
+ * size is the lever. Needs GITHUB_TOKEN (GraphQL is never anonymous); without it the phase is
+ * skipped with a message.
  */
 
-const PAGE = 25;
+/** Pulls per page. Each carries up to 100 files, so 50 keeps a page well under GraphQL's node limit. */
+const PAGE = 50;
 const FILES_KEPT = 100;
-const HISTORY_PAGE_DELAY_MS = 1_000;
+/** Merged and closed pulls walked for reviewer statistics. */
+const HISTORY_LIMIT = 300;
 
 const QUERY = /* GraphQL */ `
   query Pulls(
@@ -183,10 +186,6 @@ export async function syncPulls(
   progress: PullSyncProgress,
   hooks: PullSyncHooks = {},
 ): Promise<PullSyncResult> {
-  const [repo] = await sql<{ pull_limit: number; pull_history_limit: number }[]>`
-    select pull_limit, pull_history_limit from repo where id = ${repoId}`;
-  const openLimit = repo?.pull_limit ?? 200;
-  const historyLimit = repo?.pull_history_limit ?? 300;
   let pages = 0;
 
   const walk = async (
@@ -244,7 +243,7 @@ export async function syncPulls(
     return { seen, complete, oldest };
   };
 
-  const open = await walk(["OPEN"], openLimit, "pulls", "fetching open pull requests", 0);
+  const open = await walk(["OPEN"], Infinity, "pulls", "fetching open pull requests", 0);
   // Anything we thought was open and did not see again has closed or merged since.
   // When the walk was capped, only rows newer than the oldest seen can be judged.
   const seenIds = [...open.seen];
@@ -258,13 +257,13 @@ export async function syncPulls(
   await refreshReviewers(repoId);
 
   let history = 0;
-  if (historyLimit > 0) {
+  {
     const closed = await walk(
       ["MERGED", "CLOSED"],
-      historyLimit,
+      HISTORY_LIMIT,
       "pull-history",
       "fetching reviewed pull requests",
-      HISTORY_PAGE_DELAY_MS,
+      0,
     );
     history = closed.seen.size;
     const roster = await refreshReviewers(repoId);

@@ -53,30 +53,41 @@ calibration.
 ### Sync
 
 `POST /api/sync {owner, name}` answers 202 and streams progress through the `repo` row. Only
-open issues are fetched, newest updated first, one page per transaction, so recent work lands
-and gets classified first. Every sync looks at the whole open list, which is how closures are
-noticed: an issue stored as open that no longer appears is marked closed and stays as history.
-`sync_limit` caps how many open issues are kept; the most recently updated win, updates to
-stored issues always apply, and the walk stops at the cap.
+open issues are fetched, newest updated first. The page count is known from the repository's
+open count, so pages are requested six at a time and each is written in its own transaction
+as it lands, so recent work is visible and being classified within a second or two. Every
+sync looks at the whole open list, which is how closures are noticed: an issue stored as open
+that no longer appears is marked closed and stays as history. There is no cap; every open
+issue is kept.
 
-With a `GITHUB_TOKEN`, a GraphQL walk fetches open pull requests (files, reviews, requested
-reviewers), up to `pull_limit`, and marks the ones that vanished as closed. Reviewer history
-is a separate path: a second walk over merged and closed pulls, up to its own
-`pull_history_limit`, that feeds reviewer statistics only and never counts against the cap on
-pulls waiting for review. The reviewer roster is rebuilt in pure code after every page; bots
-and AI review accounts are excluded.
+With a `GITHUB_TOKEN`, a GraphQL walk fetches every open pull request (files, reviews,
+requested reviewers), fifty per page, and marks the ones that vanished as closed. Reviewer
+history is a separate path: a second walk over the 300 most recently updated merged and closed
+pulls that feeds reviewer statistics only. The reviewer roster is rebuilt in pure code after
+every page; bots and AI review accounts are excluded.
 
-Both caps mean work that is still relevant to triage: `sync_limit` is open issues and
-`pull_limit` is open pull requests.
+The pipeline has no tuning knobs. It is set for speed (jev is cheap) and only GitHub's rate
+limits hold it back; the constants live at the top of `sync.ts`, `pulls.ts` and
+`classifier.ts` for recalibration if a limit shows up.
 
 ### Classify
 
-One scheduler per repo in `apps/api/src/worker`. A poke while a request is in flight only sets a
-dirty flag; pokes inside a short collect window share one run; a finished batch re-runs after
-`cadence_ms` while work remains. Every request is one shared state plus an independent matrix
-of questions, and every answer is stored with the `questions_version` it was asked under.
+One scheduler per repo in `apps/api/src/worker`, up to six TypeSafe requests in flight. A
+batch is claimed by setting `classifying` in the statement that selects it, so concurrent
+requests never share an item. Requests are right-sized rather than texts cut: issue and pull
+bodies go to the model whole, and a batch takes as many claimed items as fit a token budget
+measured on the serialized request (`packages/triage/src/pack.ts`), with the character-to-token
+ratio calibrated from the usage every response reports. jev's window is 64K tokens per request
+and 32K for the state plus one question, and its accuracy falls as unrelated state grows, so
+the target sits at about 28K. A request the API still refuses is split in half and resent; an
+item refused on its own has its body cut once, and if that fails too it is set aside until the
+next restart instead of blocking its neighbours. A poke while every slot is busy only sets a dirty flag; pokes
+inside a short collect window share one start; a finished batch that reports more work starts
+the next at once and fills the free slots. Every request is one shared state plus an
+independent matrix of questions, and every answer is stored with the `questions_version` it was
+asked under.
 
-Per issue, questions v2 asks:
+Per issue, questions v3 asks:
 
 | Family      | Primitive | Outcomes                                                                         |
 | ----------- | --------- | -------------------------------------------------------------------------------- |

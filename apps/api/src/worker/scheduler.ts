@@ -1,13 +1,15 @@
 /**
  * Backpressure for one TypeSafe scope (a repo). Pure scheduling, no I/O:
- *  - at most one job in flight;
- *  - a poke while in flight only sets `dirty` (counted as dropped);
- *  - pokes inside the collect window share one job (counted as coalesced);
- *  - after a job, re-run only if dirty or the job reports more work, after `cadenceMs`.
+ *  - up to `maxInFlight` jobs at once; a job that reports more work fills the remaining slots;
+ *  - a poke while every slot is busy only sets `dirty` (counted as dropped);
+ *  - pokes inside the collect window share one start (counted as coalesced);
+ *  - when a job ends, another starts at once while it reported more work; otherwise a dirty
+ *    flag starts one more after the collect window.
  * The job itself never triggers a poke, so there is no feedback storm.
  */
 export interface SchedulerStats {
-  inFlight: boolean;
+  /** Jobs running right now. */
+  inFlight: number;
   dirty: boolean;
   dropped: number;
   coalesced: number;
@@ -25,7 +27,7 @@ export type Job = () => Promise<JobResult>;
 
 export class Scheduler {
   readonly stats: SchedulerStats = {
-    inFlight: false,
+    inFlight: 0,
     dirty: false,
     dropped: 0,
     coalesced: 0,
@@ -34,16 +36,23 @@ export class Scheduler {
   #timer: ReturnType<typeof setTimeout> | null = null;
   readonly #job: Job;
   readonly #collectMs: number;
+  readonly #maxInFlight: number;
   readonly #onChange: (s: SchedulerStats) => void;
 
-  constructor(job: Job, collectMs: number, onChange: (s: SchedulerStats) => void = () => {}) {
+  constructor(
+    job: Job,
+    collectMs: number,
+    maxInFlight = 1,
+    onChange: (s: SchedulerStats) => void = () => {},
+  ) {
     this.#job = job;
     this.#collectMs = collectMs;
+    this.#maxInFlight = Math.max(1, maxInFlight);
     this.#onChange = onChange;
   }
 
   poke(): void {
-    if (this.stats.inFlight) {
+    if (this.stats.inFlight >= this.#maxInFlight) {
       this.stats.dirty = true;
       this.stats.dropped += 1;
       this.#onChange(this.stats);
@@ -61,12 +70,22 @@ export class Scheduler {
     if (this.#timer) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = null;
-      void this.#run();
+      this.#start();
     }, ms);
   }
 
+  /** Starts one run if a slot is free; runs that find more work fill the other slots. */
+  #start(): void {
+    if (this.stats.inFlight >= this.#maxInFlight) return;
+    void this.#run();
+  }
+
+  #fill(): void {
+    while (this.stats.inFlight < this.#maxInFlight) void this.#run();
+  }
+
   async #run(): Promise<void> {
-    this.stats.inFlight = true;
+    this.stats.inFlight += 1;
     this.stats.dirty = false;
     this.stats.runs += 1;
     this.#onChange(this.stats);
@@ -76,11 +95,14 @@ export class Scheduler {
     } catch {
       // The job records its own error; scheduling continues only if poked again.
     } finally {
-      this.stats.inFlight = false;
+      this.stats.inFlight -= 1;
       this.#onChange(this.stats);
     }
-    if (this.stats.dirty || result.more) {
-      this.#schedule(Math.max(this.stats.dirty ? this.#collectMs : 0, result.cadenceMs));
+    if (result.more) {
+      if (result.cadenceMs > 0) this.#schedule(result.cadenceMs);
+      else this.#fill();
+    } else if (this.stats.dirty && this.stats.inFlight === 0 && !this.#timer) {
+      this.#schedule(this.#collectMs);
     }
   }
 

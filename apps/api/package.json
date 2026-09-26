@@ -25,6 +25,7 @@
     "@triage/schema": "workspace:*",
     "@triage/triage": "workspace:*",
     "@typesafe-ai/sdk": "^0.6.0",
+    "bottleneck": "^2.19.5",
     "cn": "^0.3.0",
     "hono": "^4.13.8",
     "jose": "^6.2.12",

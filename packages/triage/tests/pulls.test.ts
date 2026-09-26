@@ -65,10 +65,10 @@ const scoreAnswer = (score: number) => ({
 });
 
 describe("pull state and questions", () => {
-  test("state truncates bodies and file lists, keeps candidate summaries", () => {
+  test("state carries bodies whole, caps file lists, keeps candidate summaries", () => {
     const s = buildPullState(repo, [pull(1, [candidate("bob", { requested: true })])]);
     const p = s.pulls[0]!;
-    expect(p.body_excerpt.length).toBeLessThanOrEqual(1201);
+    expect(p.body.length).toBeGreaterThan(1201);
     expect(p.files).toHaveLength(30);
     expect(p.review_decision).toBe("none yet");
     expect(p.candidates_for_reviewer[0]).toMatchObject({

@@ -1,6 +1,6 @@
 import { choice, score } from "@typesafe-ai/sdk";
 import type { ChoiceResponse, Questions, ScoreResponse } from "@typesafe-ai/sdk";
-import { excerpt } from "./questions.ts";
+import { clean } from "./questions.ts";
 import {
   NONE,
   PULL_FAMILIES,
@@ -29,7 +29,7 @@ export function buildPullState(repo: RepoForTriage, pulls: readonly PullForTriag
     pulls: pulls.map((p) => ({
       number: p.number,
       title: p.title,
-      body_excerpt: excerpt(p.body, 1000),
+      body: clean(p.body),
       draft: p.draft,
       author: p.author,
       labels: p.labels,
@@ -76,7 +76,7 @@ export function buildPullQuestions(pulls: readonly PullForTriage[], repo: RepoFo
     const path = `\`pulls[${idx}]\``;
     questions[pullQuestionKey(idx, "review_effort")] = score(
       {
-        question: `How much reviewer time does ${path} in ${repoName} need before it could be merged responsibly? Judge from the title, body_excerpt, files, additions, deletions and changed_files.`,
+        question: `How much reviewer time does ${path} in ${repoName} need before it could be merged responsibly? Judge from the title, body, files, additions, deletions and changed_files.`,
         notes:
           "Size is only a hint: a large generated or mechanical diff (lockfiles, snapshots, renames, formatting) is trivial, while a small change to core logic, concurrency, data formats or security can be major. Drafts are judged as if ready.",
       },
@@ -91,7 +91,7 @@ export function buildPullQuestions(pulls: readonly PullForTriage[], repo: RepoFo
       criteria[NONE] = "No listed candidate has reviewed code related to this pull request";
       questions[pullQuestionKey(idx, "reviewer")] = choice(
         {
-          question: `Which of ${path}.candidates_for_reviewer is best placed to review ${path}? Match what the pull changes (files, title, body_excerpt) against each candidate's reviews_directories and recently_approved titles.`,
+          question: `Which of ${path}.candidates_for_reviewer is best placed to review ${path}? Match what the pull changes (files, title, body) against each candidate's reviews_directories and recently_approved titles.`,
           notes:
             "Judge expertise only; workload is balanced elsewhere. Candidates were shortlisted by code from directory overlap and most have some overlap; prefer the one whose recent reviews are closest in subject. Being already_requested is a hint, not a decision.",
         },

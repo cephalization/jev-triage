@@ -258,6 +258,9 @@ importers:
       '@typesafe-ai/sdk':
         specifier: ^0.6.0
         version: 0.6.0
+      bottleneck:
+        specifier: ^2.19.5
+        version: 2.19.5
       cn:
         specifier: ^0.3.0
         version: 0.3.0

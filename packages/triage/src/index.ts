@@ -5,5 +5,6 @@ export * from "./decide.ts";
 export * from "./priority.ts";
 export * from "./calibration.ts";
 export * from "./pulls.ts";
+export * from "./pack.ts";
 export * from "./reviewers.ts";
 export * from "./review/index.ts";

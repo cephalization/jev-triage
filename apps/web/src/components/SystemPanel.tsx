@@ -15,7 +15,6 @@ import { calibrationPairs, type TriageRow } from "../lib/derive.ts";
 import { ago, compact, pct } from "../lib/format.ts";
 import { Columns, Legend } from "./Charts.tsx";
 import { Button } from "./ui/button.tsx";
-import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
 import { Slider } from "./ui/slider.tsx";
 import { Switch } from "./ui/switch.tsx";
@@ -80,29 +79,6 @@ export function SystemPanel({
   const [repo] = useQuery(repoId ? queries.repos.byId(repoId) : undefined);
   const [runs] = useQuery(repoId ? queries.runs.byRepo({ repoId, limit: 30 }) : undefined);
   const prices = usePrices();
-  const [batch, setBatch] = useState("20");
-  const [cadence, setCadence] = useState("2000");
-  const [budget, setBudget] = useState("0");
-  const [limit, setLimit] = useState("100");
-  const [pullLimit, setPullLimit] = useState("200");
-  const [pullHistory, setPullHistory] = useState("300");
-  useEffect(() => {
-    if (!repo) return;
-    setBatch(String(repo.batch_size));
-    setCadence(String(repo.cadence_ms));
-    setBudget(String(repo.budget_tokens));
-    setLimit(String(repo.sync_limit));
-    setPullLimit(String(repo.pull_limit));
-    setPullHistory(String(repo.pull_history_limit));
-  }, [
-    repo?.id,
-    repo?.batch_size,
-    repo?.cadence_ms,
-    repo?.budget_tokens,
-    repo?.sync_limit,
-    repo?.pull_limit,
-    repo?.pull_history_limit,
-  ]);
 
   const classifyRuns = useMemo(
     () => (runs ?? []).filter((r) => r.kind.startsWith("classify") && r.status === "ok").reverse(),
@@ -219,7 +195,7 @@ export function SystemPanel({
 
       <Section
         title="Classification"
-        description="Shared with everyone on this repo. One TypeSafe request per batch, one in flight."
+        description="Shared with everyone on this repo. Every open issue and pull request is synced and classified as fast as GitHub and TypeSafe allow: batches of 20 issues or 8 pulls, four requests in flight, no pauses."
       >
         {!repo && <p className="text-muted-foreground">Pick a repository first.</p>}
         {repo && (
@@ -238,95 +214,9 @@ export function SystemPanel({
                 }
               />
             </label>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="batch">Batch size</Label>
-                <Input
-                  id="batch"
-                  className="h-8"
-                  value={batch}
-                  onChange={(e) => setBatch(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="cadence">Cadence (ms)</Label>
-                <Input
-                  id="cadence"
-                  className="h-8"
-                  value={cadence}
-                  onChange={(e) => setCadence(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="limit">Sync cap (issues)</Label>
-                <Input
-                  id="limit"
-                  className="h-8"
-                  value={limit}
-                  onChange={(e) => setLimit(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="pull-limit">Open pull requests to keep</Label>
-                <Input
-                  id="pull-limit"
-                  className="h-8"
-                  value={pullLimit}
-                  onChange={(e) => setPullLimit(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="pull-history">
-                  Merged and closed pull requests kept for reviewer stats, separate from the cap
-                  above (0 = off)
-                </Label>
-                <Input
-                  id="pull-history"
-                  className="h-8"
-                  value={pullHistory}
-                  onChange={(e) => setPullHistory(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label htmlFor="budget">Token budget (0 = unlimited)</Label>
-                <Input
-                  id="budget"
-                  className="h-8"
-                  value={budget}
-                  onChange={(e) => setBudget(e.target.value)}
-                  inputMode="numeric"
-                />
-              </div>
-            </div>
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-xs text-muted-foreground tabular-nums">
-                Used {compact(Number(repo.tokens_used))} tokens
-                {Number(repo.budget_tokens) > 0 ? ` of ${compact(Number(repo.budget_tokens))}` : ""}
-              </span>
-              <Button
-                size="sm"
-                onClick={() =>
-                  void z.mutate(
-                    mutators.repo.setKnobs({
-                      repoId: repo.id,
-                      batchSize: Math.min(50, Math.max(1, Number(batch) || 20)),
-                      cadenceMs: Math.min(60_000, Math.max(250, Number(cadence) || 2000)),
-                      budgetTokens: Math.max(0, Number(budget) || 0),
-                      syncLimit: Math.min(5000, Math.max(1, Number(limit) || 100)),
-                      pullLimit: Math.min(2000, Math.max(1, Number(pullLimit) || 200)),
-                      pullHistoryLimit: Math.min(2000, Math.max(0, Number(pullHistory) || 0)),
-                    }),
-                  )
-                }
-              >
-                Save
-              </Button>
-            </div>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              Used {compact(Number(repo.tokens_used))} tokens
+            </span>
           </>
         )}
       </Section>
@@ -438,7 +328,7 @@ export function SystemPanel({
         {ws && (
           <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-sm">
             <dt className="text-muted-foreground">In flight</dt>
-            <dd>{ws.in_flight ? "yes" : "no"}</dd>
+            <dd>{ws.in_flight ? "requests running" : "idle"}</dd>
             <dt className="text-muted-foreground">Dirty</dt>
             <dd>{ws.dirty ? "yes" : "no"}</dd>
             <dt className="text-muted-foreground">Pending</dt>

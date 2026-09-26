@@ -34,9 +34,9 @@ const issue = (n: number, candidates: IssueForTriage["candidates"] = []): IssueF
 });
 
 describe("state", () => {
-  test("truncates bodies and keys issues by batch index", () => {
+  test("carries bodies whole and keys issues by batch index", () => {
     const s = buildState(repo, [], [issue(1)]);
-    expect(s.issues[0]!.body_excerpt.length).toBeLessThanOrEqual(1501);
+    expect(s.issues[0]!.body.length).toBe(2000);
     expect(s.issues[0]!.age_days).toBe(4);
     expect(s.repo.area_labels).toEqual(["cli", "docs-site"]);
   });
@@ -55,7 +55,7 @@ describe("state", () => {
   });
 
   test("excerpt keeps short text intact", () => {
-    expect(excerpt("hello")).toBe("hello");
+    expect(excerpt("hello", 1500)).toBe("hello");
     // A cut that would land between the halves of an emoji backs off one unit; a lone surrogate
     // in the state is rejected by TypeSafe as invalid Unicode.
     const rocket = String.fromCodePoint(0x1f680);

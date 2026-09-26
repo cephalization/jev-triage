@@ -1,4 +1,11 @@
-import { cut, NONE, QUESTIONS_VERSION } from "@triage/triage";
+import {
+  calibrateCharsPerToken,
+  cut,
+  itemCosts,
+  NONE,
+  packPrefix,
+  QUESTIONS_VERSION,
+} from "@triage/triage";
 import {
   buildPullQuestions,
   buildPullState,
@@ -23,20 +30,45 @@ import type { TransactionSql } from "postgres";
 import { newId, sql } from "../db.ts";
 import { env } from "../env.ts";
 import { Scheduler, type JobResult, type SchedulerStats } from "./scheduler.ts";
+import { isRequestRejected } from "./typesafe.ts";
+import type { EntryType, Questions } from "@typesafe-ai/sdk";
 
 /**
- * Classification worker: one Scheduler per repo, one TypeSafe request per batch.
- * Selection: issues flagged `reclassify`, or with no classification at the repo's
- * current questions_version; then open pull requests on the same rule. Every answer
- * is stored with that version; bumping it means new rows, never edits.
+ * Classification worker: one Scheduler per repo, one TypeSafe request per batch, several
+ * batches in flight. Selection: issues flagged `reclassify`, or with no classification at the
+ * repo's current questions_version; then open pull requests on the same rule. A batch is
+ * claimed by setting `classifying` in the same statement that selects it, so concurrent
+ * requests never share an item. Every answer is stored with that version; bumping it means
+ * new rows, never edits.
+ *
+ * The pipeline is tuned for speed, not thrift (jev is cheap): no cadence between batches and
+ * as many requests in flight as the model comfortably takes. Recalibrate here if a rate limit
+ * shows up.
  */
 
 const LABELED_EXAMPLES_MAX = 20;
 const AREA_LABELS_MAX = 8;
 const CANDIDATES_MAX = 5;
-const COLLECT_MS = 300;
-/** Pull state is heavier per item (files, candidates); keep requests well inside the model's window. */
-const PULL_BATCH_MAX = 8;
+/** How long a poke waits for neighbours before a run starts; pages of a sync land close together. */
+const COLLECT_MS = 50;
+/**
+ * Requests are right-sized, not text: bodies go whole, and a batch takes as many items as fit
+ * a token budget measured on the serialized request. jev's window is 64K tokens per request
+ * and 32K for the state plus one question (docs.typesafe.ai/models), and its accuracy falls as
+ * unrelated state grows, so the target sits well under both. Characters become tokens through
+ * a ratio calibrated from the usage every response reports.
+ */
+const REQUEST_TOKEN_TARGET = 28_000;
+/** An item too large to fit a request on its own has its body cut to this many tokens. */
+const ITEM_TOKEN_HARD = 24_000;
+/** Ceilings on items per request; the budget usually binds first. */
+const ISSUES_PER_REQUEST_MAX = 20;
+const PULLS_PER_REQUEST_MAX = 8;
+/** Rows claimed per run, before packing; the ones that do not fit are released at once. */
+const ISSUE_CLAIM = 40;
+const PULL_CLAIM = 16;
+/** Concurrent TypeSafe requests per repository. Smaller, right-sized batches mean more of them. */
+const MAX_IN_FLIGHT = 6;
 
 interface RepoRow {
   id: string;
@@ -44,10 +76,6 @@ interface RepoRow {
   name: string;
   description: string | null;
   questions_version: number;
-  batch_size: number;
-  cadence_ms: number;
-  budget_tokens: string | number;
-  tokens_used: string | number;
   paused: boolean;
 }
 
@@ -100,9 +128,27 @@ interface Usage {
   output_tokens: number;
 }
 
+/** What one request needs beyond its items; issues and pulls differ only here. */
+interface RequestShape<T extends { id: string; body: string }> {
+  what: "issues" | "pulls";
+  table: "issue" | "pull";
+  runKind: "classify" | "classify_pulls";
+  build: (items: readonly T[]) => { state: EntryType; questions: Questions };
+  toRows: (
+    items: readonly T[],
+    answers: Record<string, AnyAnswer>,
+    model: string,
+    runId: string,
+  ) => ClassificationInsert[];
+}
+
 export class ClassifierWorker {
   readonly #schedulers = new Map<string, Scheduler>();
   readonly #systemOne: SystemOne | null;
+  /** Serialized characters per input token, calibrated from every response; starts at a guess. */
+  #charsPerToken = 4;
+  /** Items the model refused even alone and cut; skipped until restart rather than retried forever. */
+  readonly #poison = new Set<string>();
 
   constructor(systemOne: SystemOne | null) {
     this.#systemOne = systemOne;
@@ -116,6 +162,7 @@ export class ClassifierWorker {
       s = new Scheduler(
         () => this.#runBatch(repoId),
         COLLECT_MS,
+        MAX_IN_FLIGHT,
         (stats) => void this.#persistStats(repoId, stats),
       );
       const seed = this.#seed.get(repoId);
@@ -145,7 +192,7 @@ export class ClassifierWorker {
     try {
       await sql`
         insert into worker_state (repo_id, in_flight, dirty, dropped_triggers, coalesced_triggers, requests, updated_at)
-        values (${repoId}, ${stats.inFlight}, ${stats.dirty}, ${stats.dropped}, ${stats.coalesced}, ${stats.runs}, now())
+        values (${repoId}, ${stats.inFlight > 0}, ${stats.dirty}, ${stats.dropped}, ${stats.coalesced}, ${stats.runs}, now())
         on conflict (repo_id) do update set in_flight = excluded.in_flight, dirty = excluded.dirty,
           dropped_triggers = excluded.dropped_triggers, coalesced_triggers = excluded.coalesced_triggers,
           requests = excluded.requests, updated_at = now()`;
@@ -163,27 +210,20 @@ export class ClassifierWorker {
       await this.#setError(repoId, "TYPESAFE_API_KEY is not set; classification disabled", 0);
       return none;
     }
-    const budget = Number(repo.budget_tokens);
-    const used = Number(repo.tokens_used);
-    if (budget > 0 && used >= budget) {
-      await this.#setError(
-        repoId,
-        `token budget reached (${used}/${budget}); raise the budget to continue`,
-        0,
-      );
-      return none;
-    }
     const version = Math.max(repo.questions_version, QUESTIONS_VERSION);
     if (repo.questions_version < version) {
       // The code's questions changed: bump the repo so every client reads rows at this version.
       await sql`update repo set questions_version = ${version} where id = ${repoId} and questions_version < ${version}`;
     }
 
+    const poison = [...this.#poison];
+    const notPoisonIssue = poison.length ? sql`and i.id <> all(${sql.array(poison)})` : sql``;
+    const notPoisonPull = poison.length ? sql`and p.id <> all(${sql.array(poison)})` : sql``;
     const issueFilter = sql`
-      i.repo_id = ${repoId} and (i.reclassify or not exists (
+      i.repo_id = ${repoId} and not i.classifying ${notPoisonIssue} and (i.reclassify or not exists (
         select 1 from classification c where c.issue_id = i.id and c.kind = 'category' and c.questions_version = ${version}))`;
     const pullFilter = sql`
-      p.repo_id = ${repoId} and p.state = 'open' and (p.reclassify or not exists (
+      p.repo_id = ${repoId} and p.state = 'open' and not p.classifying ${notPoisonPull} and (p.reclassify or not exists (
         select 1 from classification c where c.pull_id = p.id and c.kind = 'review_effort' and c.questions_version = ${version}))`;
     const [issueCount] = await sql<
       { count: string }[]
@@ -203,31 +243,36 @@ export class ClassifierWorker {
       areaLabels: await this.#areaLabels(repoId),
     };
 
+    // Claim and select in one statement: concurrent runs skip each other's rows.
     if (pendingIssues > 0) {
       const batch = await sql<IssueRow[]>`
-        select i.id, i.number, i.title, i.body, i.state, i.labels_json, i.comments, i.reactions, i.created_at, i.author_association
-        from issue i where ${issueFilter}
-        order by i.reclassify desc, (i.state = 'open') desc, i.updated_at desc limit ${repo.batch_size}`;
+        update issue set classifying = true where id in (
+          select i.id from issue i where ${issueFilter}
+          order by i.reclassify desc, (i.state = 'open') desc, i.updated_at desc
+          limit ${ISSUE_CLAIM} for update skip locked)
+        returning id, number, title, body, state, labels_json, comments, reactions, created_at, author_association`;
       if (batch.length > 0) {
         const done = await this.#classifyIssues(repo, repoInfo, version, batch, pending);
-        return done ? { more: pending > batch.length, cadenceMs: repo.cadence_ms } : none;
+        return done ? { more: pending > batch.length, cadenceMs: 0 } : none;
       }
     }
     if (pendingPulls > 0) {
       const batch = await sql<PullRow[]>`
-        select p.id, p.number, p.title, p.body, p.state, p.draft, p.author, p.labels_json, p.additions, p.deletions,
-          p.changed_files, p.files_json, p.base_ref, p.created_at, p.requested_reviewers_json, p.review_decision
-        from pull p where ${pullFilter}
-        order by p.reclassify desc, p.updated_at desc limit ${Math.min(repo.batch_size, PULL_BATCH_MAX)}`;
+        update pull set classifying = true where id in (
+          select p.id from pull p where ${pullFilter}
+          order by p.reclassify desc, p.updated_at desc limit ${PULL_CLAIM} for update skip locked)
+        returning id, number, title, body, state, draft, author, labels_json, additions, deletions,
+          changed_files, files_json, base_ref, created_at, requested_reviewers_json, review_decision`;
       if (batch.length > 0) {
         const done = await this.#classifyPulls(repo, repoInfo, version, batch, pending);
-        return done ? { more: pending > batch.length, cadenceMs: repo.cadence_ms } : none;
+        return done ? { more: pending > batch.length, cadenceMs: 0 } : none;
       }
     }
     return none;
   }
 
   /** Returns true when the request succeeded (rows written); false after a recorded error. */
+  /** Builds, packs and sends a batch of claimed issues; rows that do not fit are released. */
   async #classifyIssues(
     repo: RepoRow,
     repoInfo: RepoForTriage,
@@ -253,45 +298,23 @@ export class ClassifierWorker {
         candidates: await this.#candidates(repoId, row),
       });
     }
-    const state = buildState(repoInfo, examples, issues);
-    const questions = buildQuestions(issues, repoInfo);
-    const questionCount = countQuestions(questions);
-    const batchIds = issues.map((i) => i.id);
-    const runId = newId();
-    await sql`insert into run (id, repo_id, kind, status, issues, questions) values (${runId}, ${repoId}, 'classify', 'running', ${issues.length}, ${questionCount})`;
-    await sql`update issue set classifying = true where id in ${sql(batchIds)}`;
-    const t0 = Date.now();
-    try {
-      const result = await this.#systemOne!.ask(state, questions);
-      const ms = Date.now() - t0;
-      this.#log(
-        repoId,
-        version,
-        "issues",
-        issues.length,
-        questionCount,
-        result.usage,
-        ms,
-        result.model,
-      );
-      const folded = foldAnswers(result.answers as Record<string, AnyAnswer>, issues.length);
-      const rows = issues.flatMap((issue, idx) =>
-        classificationRows(issue, folded[idx] ?? {}, version, result.model, runId, repoId),
-      );
-      await sql.begin(async (tx) => {
-        await insertRows(tx, rows);
-        await tx`update issue set reclassify = false, classifying = false where id in ${tx(batchIds)}`;
-        await finishRun(tx, repoId, runId, result.usage, ms, result.model, pending - issues.length);
-      });
-      return true;
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      console.error(`[worker] ${repoId} request failed: ${message}`);
-      await sql`update run set finished_at = now(), status = 'error', error = ${message}, latency_ms = ${Date.now() - t0} where id = ${runId}`;
-      await sql`update issue set classifying = false where id in ${sql(batchIds)}`;
-      await this.#setError(repoId, message, pending);
-      return false;
-    }
+    const shape: RequestShape<IssueForTriage> = {
+      what: "issues",
+      table: "issue",
+      runKind: "classify",
+      build: (items) => ({
+        state: buildState(repoInfo, examples, items),
+        questions: buildQuestions(items, repoInfo),
+      }),
+      toRows: (items, answers, model, runId) => {
+        const folded = foldAnswers(answers, items.length);
+        return items.flatMap((issue, idx) =>
+          classificationRows(issue, folded[idx] ?? {}, version, model, runId, repoId),
+        );
+      },
+    };
+    const kept = await this.#pack(shape, issues, ISSUES_PER_REQUEST_MAX);
+    return this.#request(repo, version, shape, kept, pending);
   }
 
   async #classifyPulls(
@@ -333,45 +356,135 @@ export class ClassifierWorker {
         ),
       };
     });
-    const state = buildPullState(repoInfo, pulls);
-    const questions = buildPullQuestions(pulls, repoInfo);
+    const shape: RequestShape<PullForTriage> = {
+      what: "pulls",
+      table: "pull",
+      runKind: "classify_pulls",
+      build: (items) => ({
+        state: buildPullState(repoInfo, items),
+        questions: buildPullQuestions(items, repoInfo),
+      }),
+      toRows: (items, answers, model, runId) => {
+        const folded = foldPullAnswers(
+          answers as Parameters<typeof foldPullAnswers>[0],
+          items.length,
+        );
+        return items.flatMap((pull, idx) =>
+          pullClassificationRows(pull, folded[idx] ?? {}, version, model, runId, repoId),
+        );
+      },
+    };
+    const kept = await this.#pack(shape, pulls, PULLS_PER_REQUEST_MAX);
+    return this.#request(repo, version, shape, kept, pending);
+  }
+
+  /** Serialized size of a request, the unit the token budget is measured in. */
+  #measure<T extends { id: string; body: string }>(shape: RequestShape<T>, items: readonly T[]) {
+    const { state, questions } = shape.build(items);
+    return JSON.stringify(state).length + JSON.stringify(questions).length;
+  }
+
+  /** The leading items that fit the budget; the rest are released for another run to claim. */
+  async #pack<T extends { id: string; body: string }>(
+    shape: RequestShape<T>,
+    items: T[],
+    maxItems: number,
+  ): Promise<T[]> {
+    const { base, costs } = itemCosts(items, (subset) => this.#measure(shape, subset));
+    const keep = packPrefix(costs, base, REQUEST_TOKEN_TARGET * this.#charsPerToken, maxItems);
+    const rest = items.slice(keep).map((i) => i.id);
+    if (rest.length > 0)
+      await sql`update ${sql(shape.table)} set classifying = false where id in ${sql(rest)}`;
+    return items.slice(0, keep);
+  }
+
+  /**
+   * One request for `items`, already claimed. Returns true when its rows were written. A
+   * request the API refuses for size is split in half and each half sent again; a single item
+   * refused on its own has its body cut once, and if that still fails it is set aside.
+   */
+  async #request<T extends { id: string; body: string }>(
+    repo: RepoRow,
+    version: number,
+    shape: RequestShape<T>,
+    items: T[],
+    pending: number,
+    cutOnce = false,
+  ): Promise<boolean> {
+    if (items.length === 0) return true;
+    const repoId = repo.id;
+    const ids = items.map((i) => i.id);
+    const { state, questions } = shape.build(items);
     const questionCount = countQuestions(questions);
-    const batchIds = pulls.map((p) => p.id);
     const runId = newId();
-    await sql`insert into run (id, repo_id, kind, status, issues, questions) values (${runId}, ${repoId}, 'classify_pulls', 'running', ${pulls.length}, ${questionCount})`;
-    await sql`update pull set classifying = true where id in ${sql(batchIds)}`;
+    await sql`insert into run (id, repo_id, kind, status, issues, questions) values (${runId}, ${repoId}, ${shape.runKind}, 'running', ${items.length}, ${questionCount})`;
     const t0 = Date.now();
     try {
       const result = await this.#systemOne!.ask(state, questions);
       const ms = Date.now() - t0;
+      this.#charsPerToken = calibrateCharsPerToken(
+        this.#charsPerToken,
+        this.#measure(shape, items),
+        result.usage.input_tokens,
+      );
       this.#log(
         repoId,
         version,
-        "pulls",
-        pulls.length,
+        shape.what,
+        items.length,
         questionCount,
         result.usage,
         ms,
         result.model,
       );
-      const folded = foldPullAnswers(
-        result.answers as Parameters<typeof foldPullAnswers>[0],
-        pulls.length,
-      );
-      const rows = pulls.flatMap((pull, idx) =>
-        pullClassificationRows(pull, folded[idx] ?? {}, version, result.model, runId, repoId),
+      const rows = shape.toRows(
+        items,
+        result.answers as Record<string, AnyAnswer>,
+        result.model,
+        runId,
       );
       await sql.begin(async (tx) => {
         await insertRows(tx, rows);
-        await tx`update pull set reclassify = false, classifying = false where id in ${tx(batchIds)}`;
-        await finishRun(tx, repoId, runId, result.usage, ms, result.model, pending - pulls.length);
+        await tx`update ${tx(shape.table)} set reclassify = false, classifying = false where id in ${tx(ids)}`;
+        await finishRun(tx, repoId, runId, result.usage, ms, result.model, pending - items.length);
       });
       return true;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      console.error(`[worker] ${repoId} pull request failed: ${message}`);
       await sql`update run set finished_at = now(), status = 'error', error = ${message}, latency_ms = ${Date.now() - t0} where id = ${runId}`;
-      await sql`update pull set classifying = false where id in ${sql(batchIds)}`;
+      if (isRequestRejected(e)) {
+        if (items.length > 1) {
+          const mid = Math.ceil(items.length / 2);
+          console.warn(
+            `[worker] ${repoId}: request for ${items.length} ${shape.what} refused (${message}); sending it as two`,
+          );
+          const first = await this.#request(repo, version, shape, items.slice(0, mid), pending);
+          const second = await this.#request(repo, version, shape, items.slice(mid), pending);
+          return first && second;
+        }
+        const only = items[0]!;
+        if (!cutOnce) {
+          const max = Math.floor(ITEM_TOKEN_HARD * this.#charsPerToken);
+          console.warn(
+            `[worker] ${repoId}: ${shape.what.slice(0, -1)} ${only.id} refused alone (${message}); cutting its body to ${max} characters`,
+          );
+          return this.#request(
+            repo,
+            version,
+            shape,
+            [{ ...only, body: cut(only.body, max) }],
+            pending,
+            true,
+          );
+        }
+        this.#poison.add(only.id);
+        console.error(
+          `[worker] ${repoId}: ${shape.what.slice(0, -1)} ${only.id} refused even cut; set aside until restart`,
+        );
+      } else {
+        console.error(`[worker] ${repoId} request failed: ${message}`);
+      }
+      await sql`update ${sql(shape.table)} set classifying = false where id in ${sql(ids)}`;
       await this.#setError(repoId, message, pending);
       return false;
     }
@@ -389,7 +502,7 @@ export class ClassifierWorker {
   ) {
     const cost = this.#cost(usage.input_tokens, usage.output_tokens);
     console.log(
-      `[worker] ${repoId} v${version}: ${n} ${what}, ${questions} questions, ${usage.input_tokens} in / ${usage.output_tokens} out tokens, ${ms} ms, model ${model}${cost === null ? "" : `, $${cost.toFixed(4)}`}`,
+      `[worker] ${repoId} v${version}: ${n} ${what}, ${questions} questions, ${usage.input_tokens} in / ${usage.output_tokens} out tokens, ${ms} ms, model ${model}${cost === null ? "" : `, $${cost.toFixed(4)}`}, ~${this.#charsPerToken.toFixed(1)} chars/token`,
     );
   }
 

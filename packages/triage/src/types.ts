@@ -48,8 +48,9 @@ export interface IssueForTriage {
  * re-asked at the new version; old rows stay as history.
  *  v1: category, area, severity, needs_info, actionable, urgency, duplicate
  *  v2: needs_info and actionable replaced by action (next step) and missing (what to ask for)
+ *  v3: the same questions over whole issue and pull bodies instead of excerpts
  */
-export const QUESTIONS_VERSION = 2;
+export const QUESTIONS_VERSION = 3;
 
 export const FAMILIES = [
   "category",

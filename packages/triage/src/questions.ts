@@ -20,10 +20,14 @@ import {
  * so the model can be pointed at `issues[3]` with a backticked path.
  */
 
-export const BODY_EXCERPT_CHARS = 1500;
+/** Bodies go to the model whole; requests are sized to fit (see pack.ts), not the text. */
+export function clean(text: string): string {
+  return text.replace(/\r/g, "").trim();
+}
 
-export function excerpt(text: string, max = BODY_EXCERPT_CHARS): string {
-  const t = text.replace(/\r/g, "").trim();
+/** A bounded excerpt, for context that is not the subject of a question (examples, candidates). */
+export function excerpt(text: string, max: number): string {
+  const t = clean(text);
   return t.length > max ? `${cut(t, max)}…` : t;
 }
 
@@ -62,7 +66,7 @@ export function buildState(
     issues: issues.map((i) => ({
       number: i.number,
       title: i.title,
-      body_excerpt: excerpt(i.body),
+      body: clean(i.body),
       state: i.state,
       labels: i.labels,
       comments: i.comments,
@@ -155,7 +159,7 @@ export function buildQuestions(issues: readonly IssueForTriage[], repo: RepoForT
     const repoName = `${repo.owner}/${repo.name}`;
     questions[questionKey(idx, "category")] = choice(
       {
-        question: `What kind of issue is ${path}? Use the title, body_excerpt and labels, and follow the conventions shown in \`labeled_examples\` from the same repository (${repoName}).`,
+        question: `What kind of issue is ${path}? Use the title, body and labels, and follow the conventions shown in \`labeled_examples\` from the same repository (${repoName}).`,
         notes: "Pick the single best fit. A bug report that also asks a question is a bug.",
       },
       categoryCriteria,
@@ -185,7 +189,7 @@ export function buildQuestions(issues: readonly IssueForTriage[], repo: RepoForT
       {
         question: `What is the single next step a maintainer of ${repoName} should take on ${path}?`,
         notes: [
-          "Judge from the title, body_excerpt, labels, state, comments, reactions, age_days and author_association; the comment thread itself is not shown.",
+          "Judge from the title, body, labels, state, comments, reactions, age_days and author_association; the comment thread itself is not shown.",
           "Where `labeled_examples` carry a next_action, follow that team's conventions.",
           "If one of candidates_for_duplicate reports the same underlying problem, the next step is close.",
         ],
