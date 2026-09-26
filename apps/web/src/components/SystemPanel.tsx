@@ -280,7 +280,10 @@ export function SystemPanel({
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="pull-history">Reviewed pull requests (for reviewer stats)</Label>
+                <Label htmlFor="pull-history">
+                  Merged and closed pull requests kept for reviewer stats, separate from the cap
+                  above (0 = off)
+                </Label>
                 <Input
                   id="pull-history"
                   className="h-8"

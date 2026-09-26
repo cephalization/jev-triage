@@ -4,24 +4,20 @@ import { env } from "../env.ts";
 import { syncPulls } from "./pulls.ts";
 
 /**
- * GitHub → Postgres sync, newest first.
+ * GitHub → Postgres sync: open issues only, newest first.
  *
- * Walks `issues.listForRepo` sorted by `updated` descending, one page per transaction, so the
- * most recently touched issues land (and get classified) within a second or two.
+ * Every sync walks `issues.listForRepo` for open issues sorted by `updated` descending, one
+ * page per transaction, so the most recently touched issues land (and get classified) within
+ * a second or two. The whole open list is looked at each time (a page holds 100), which is how
+ * closures are noticed: an issue stored as open that no longer appears has closed since.
  *
- *  - recent phase: everything updated in the last year, or down to the previous high-water
- *    mark (`repo.sync_cursor`) on a re-sync;
- *  - history phase: anything older, fetched slowly (one page every HISTORY_PAGE_DELAY_MS) so it
- *    never competes with the live parts; resumable via `repo.history_cursor`;
- *  - `repo.sync_limit` caps the number of issues kept (testing knob; default 100);
- *  - pull requests (see pulls.ts) are fetched once the recent issue phase ends, before the
- *    slow history backfill, so open pulls and the reviewer roster land early.
+ *  - `repo.sync_limit` caps how many open issues are kept; the most recently updated win, and
+ *    the walk stops at the cap because nothing older could be stored;
+ *  - closed issues are never fetched; rows that close stay as history;
+ *  - pull requests (see pulls.ts) follow the issue walk.
  *
  * Progress lives on the repo row (`sync_phase`, `sync_fetched`, ...) and streams to clients.
  */
-
-const YEAR_MS = 365 * 86_400_000;
-const HISTORY_PAGE_DELAY_MS = 4_000;
 
 type ThrottleOptions = { method: string; url: string };
 
@@ -125,8 +121,6 @@ type IssueItem = {
   pull_request?: unknown;
 };
 
-type Phase = "recent" | "history";
-
 async function progress(repoId: string, fields: Record<string, unknown>) {
   const cols = Object.keys(fields);
   if (cols.length === 0) return;
@@ -146,7 +140,6 @@ async function runSync(
   let pages = 0;
   let stored = 0;
   let skippedPulls = 0;
-  let phase: Phase = "recent";
   let finalPhase = "done";
 
   const { data: meta } = await octokit.rest.repos.get({ owner, repo: name });
@@ -154,30 +147,17 @@ async function runSync(
     insert into repo (id, owner, name, description, default_branch, open_issues, sync_status, sync_error, paused, sync_limit,
       sync_phase, sync_fetched, sync_pages, sync_started_at, sync_message)
     values (${repoId}, ${owner}, ${name}, ${meta.description ?? null}, ${meta.default_branch}, ${meta.open_issues_count}, 'running', null,
-      ${opts.paused ?? false}, ${opts.limit ?? 100}, 'recent', 0, 0, now(), 'fetching newest issues')
+      ${opts.paused ?? false}, ${opts.limit ?? 100}, 'issues', 0, 0, now(), 'fetching open issues')
     on conflict (id) do update set description = excluded.description, default_branch = excluded.default_branch,
-      open_issues = excluded.open_issues, sync_status = 'running', sync_error = null, sync_phase = 'recent',
-      sync_fetched = 0, sync_pages = 0, sync_started_at = now(), sync_message = 'fetching newest issues'`;
+      open_issues = excluded.open_issues, sync_status = 'running', sync_error = null, sync_phase = 'issues',
+      sync_fetched = 0, sync_pages = 0, sync_started_at = now(), sync_message = 'fetching open issues'`;
   await sql`insert into worker_state (repo_id) values (${repoId}) on conflict do nothing`;
   await sql`insert into run (id, repo_id, kind, status) values (${runId}, ${repoId}, 'sync', 'running')`;
 
   try {
-    const repoRows = await sql<
-      {
-        sync_cursor: string | null;
-        sync_limit: number;
-        history_complete: boolean;
-        history_cursor: string | null;
-      }[]
-    >`
-      select sync_cursor, sync_limit, history_complete, history_cursor from repo where id = ${repoId}`;
-    const repo = repoRows[0]!;
-    const highWater = repo.sync_cursor;
-    const limit = repo.sync_limit;
-    const yearAgo = new Date(started - YEAR_MS).toISOString();
-    let newestSeen: string | null = null;
-    let oldestSeen: string | null = repo.history_cursor;
-    let historyDone = repo.history_complete;
+    const [repo] = await sql<{ sync_limit: number }[]>`
+      select sync_limit from repo where id = ${repoId}`;
+    const limit = repo!.sync_limit;
 
     await syncLabels(octokit, owner, name, repoId);
     const existing = new Set(
@@ -185,8 +165,11 @@ async function runSync(
         (r) => r.id,
       ),
     );
-    let total = existing.size;
-    let capped = total >= limit;
+    // The cap counts open issues; closed rows stay as history and cost nothing to keep.
+    const [openRow] = await sql<{ open: number }[]>`
+      select count(*)::int as open from issue where repo_id = ${repoId} and state = 'open'`;
+    let total = openRow?.open ?? 0;
+    let capped = false;
     let pullsDone = false;
     const pullsOnce = async () => {
       if (pullsDone) return;
@@ -212,33 +195,28 @@ async function runSync(
     const iterator = octokit.paginate.iterator(octokit.rest.issues.listForRepo, {
       owner,
       repo: name,
-      state: "all",
+      state: "open",
       sort: "updated",
       direction: "desc",
       per_page: 100,
     });
 
-    walk: for await (const page of iterator) {
+    const seen = new Set<string>();
+    let oldestSeen: string | null = null;
+    let complete = true;
+    for await (const page of iterator) {
       pages += 1;
       const remaining = Number(page.headers["x-ratelimit-remaining"] ?? "1000");
       const reset = Number(page.headers["x-ratelimit-reset"] ?? "0") * 1000;
       const toStore: IssueItem[] = [];
-      let reachedKnown = false;
       for (const raw of page.data as IssueItem[]) {
+        oldestSeen = raw.updated_at;
         if (raw.pull_request) {
           skippedPulls += 1;
           continue;
         }
-        if (!newestSeen) newestSeen = raw.updated_at;
+        seen.add(raw.node_id);
         const known = existing.has(raw.node_id);
-        if (phase === "recent" && highWater && raw.updated_at <= highWater) {
-          // From here down everything was stored by an earlier run.
-          reachedKnown = true;
-          if (historyDone) break;
-          if (oldestSeen && raw.updated_at >= oldestSeen) continue;
-          phase = "history";
-        }
-        if (phase === "recent" && !highWater && raw.updated_at < yearAgo) phase = "history";
         if (!known && total >= limit) {
           // The cap only limits new issues; updates to stored issues always apply.
           capped = true;
@@ -254,52 +232,52 @@ async function runSync(
       if (toStore.length > 0) {
         await upsertPage(repoId, toStore);
         stored += toStore.length;
-        const oldest = toStore[toStore.length - 1]!.updated_at;
-        if (!oldestSeen || oldest < oldestSeen) oldestSeen = oldest;
         hooks.onPage?.(repoId, toStore.length);
       }
       await progress(repoId, {
-        sync_phase: phase,
+        sync_phase: "issues",
         sync_fetched: stored,
         sync_pages: pages,
         sync_rate_remaining: remaining,
-        history_cursor: oldestSeen,
         last_synced_at: new Date(),
-        sync_message:
-          phase === "recent"
-            ? `fetching newest issues · page ${pages}`
-            : `backfilling history · page ${pages} · one page every ${HISTORY_PAGE_DELAY_MS / 1000}s`,
+        sync_message: `fetching open issues · page ${pages}`,
       });
       console.log(
-        `[sync] ${repoId} ${phase} page ${pages}: stored ${toStore.length} (total ${total}/${limit}, rate ${remaining})`,
+        `[sync] ${repoId} issues page ${pages}: stored ${toStore.length} (total ${total}/${limit}, rate ${remaining})`,
       );
 
       if (capped) {
+        // Nothing older could be stored, so the rest of the listing is not worth the requests.
         finalPhase = "capped";
-        // Keep walking only while there may be fresh updates to stored issues ahead: that is
-        // the recent phase before the high-water mark. Past it (the history phase) every
-        // issue is older than the last sync, so a full cap means nothing more can be stored.
-        if (reachedKnown || !highWater || phase === "history") break walk;
+        complete = false;
+        break;
       }
-      if (reachedKnown && historyDone) break walk;
-      // Recent issues are in; fetch pull requests before the slow backfill.
-      if (phase === "history") await pullsOnce();
       if (remaining < 5 && reset > Date.now()) {
         const wait = reset - Date.now() + 1000;
         await progress(repoId, {
           sync_message: `rate limited · resuming in ${Math.round(wait / 1000)}s`,
         });
         await new Promise((r) => setTimeout(r, wait));
-      } else if (phase === "history") {
-        await new Promise((r) => setTimeout(r, HISTORY_PAGE_DELAY_MS));
       }
     }
-    if (finalPhase !== "capped") historyDone = true;
+
+    // Anything stored as open and not seen again has closed since. When the walk was capped,
+    // only rows updated at least as recently as the oldest issue looked at can be judged.
+    const seenIds = [...seen];
+    const closed = complete
+      ? await sql`update issue set state = 'closed', closed_at = coalesce(closed_at, now())
+          where repo_id = ${repoId} and state = 'open' and id <> all(${sql.array(seenIds)})`
+      : oldestSeen
+        ? await sql`update issue set state = 'closed', closed_at = coalesce(closed_at, now())
+          where repo_id = ${repoId} and state = 'open' and updated_at >= ${oldestSeen}
+          and id <> all(${sql.array(seenIds)})`
+        : null;
+    if (closed && closed.count > 0)
+      console.log(`[sync] ${repoId}: ${closed.count} issues closed since the last sync`);
     await pullsOnce();
 
     await sql`update repo set sync_status = 'idle', sync_error = null, last_synced_at = now(),
-      sync_cursor = ${newestSeen ?? highWater}, history_complete = ${historyDone}, history_cursor = ${oldestSeen},
-      sync_phase = ${finalPhase}, sync_message = ${finalPhase === "capped" ? `capped at ${limit} issues` : "up to date"}
+      sync_phase = ${finalPhase}, sync_message = ${finalPhase === "capped" ? `capped at ${limit} open issues` : "up to date"}
       where id = ${repoId}`;
     await sql`update run set finished_at = now(), status = 'ok', issues = ${stored}, latency_ms = ${Date.now() - started} where id = ${runId}`;
     return { repoId, pages, issues: stored, skippedPulls, phase: finalPhase };

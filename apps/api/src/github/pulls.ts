@@ -7,7 +7,9 @@ import { sql } from "../db.ts";
  * which REST spreads over three endpoints). Two walks, both newest-updated first:
  *  - open pulls, up to `repo.pull_limit` (default 200): the ones to review;
  *  - merged/closed pulls, up to `repo.pull_history_limit` (default 300): who reviewed what,
- *    folded into the `reviewer` table after every page so the roster streams in.
+ *    folded into the `reviewer` table after every page so the roster streams in. This is a
+ *    separate path with its own limit: it feeds reviewer statistics only and never counts
+ *    against `pull_limit`, which is about pulls still waiting for review.
  * Needs GITHUB_TOKEN (GraphQL is never anonymous); without it the phase is skipped with a message.
  */
 

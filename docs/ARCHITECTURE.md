@@ -52,16 +52,22 @@ calibration.
 
 ### Sync
 
-`POST /api/sync {owner, name}` answers 202 and streams progress through the `repo` row. Issues
-are walked newest first, one page per transaction, so recent work lands and gets classified
-first. A recent phase covers the last year (or down to the previous high-water mark on a
-re-sync); a slower history phase backfills older pages and is resumable. `sync_limit` caps how
-many new issues are kept; updates to stored issues always apply.
+`POST /api/sync {owner, name}` answers 202 and streams progress through the `repo` row. Only
+open issues are fetched, newest updated first, one page per transaction, so recent work lands
+and gets classified first. Every sync looks at the whole open list, which is how closures are
+noticed: an issue stored as open that no longer appears is marked closed and stays as history.
+`sync_limit` caps how many open issues are kept; the most recently updated win, updates to
+stored issues always apply, and the walk stops at the cap.
 
 With a `GITHUB_TOKEN`, a GraphQL walk fetches open pull requests (files, reviews, requested
-reviewers) and a second walk fetches merged and closed ones for reviewer history. After every
-history page the reviewer roster is rebuilt in pure code; bots and AI review accounts are
-excluded.
+reviewers), up to `pull_limit`, and marks the ones that vanished as closed. Reviewer history
+is a separate path: a second walk over merged and closed pulls, up to its own
+`pull_history_limit`, that feeds reviewer statistics only and never counts against the cap on
+pulls waiting for review. The reviewer roster is rebuilt in pure code after every page; bots
+and AI review accounts are excluded.
+
+Both caps mean work that is still relevant to triage: `sync_limit` is open issues and
+`pull_limit` is open pull requests.
 
 ### Classify
 

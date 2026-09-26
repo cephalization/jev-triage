@@ -18,7 +18,7 @@ Nothing is written back to GitHub. The app is a shared view over a repository, n
 - **Unsure** lists issues the model was not confident about, or where a person disagreed with
   it, least confident first.
 - **Pull requests** are ordered by attention (approved and mergeable first, drafts last), with
-  an estimated review effort and a suggested reviewer drawn from the repository's review history
+  an estimated review effort and a suggested reviewer drawn from the repository's reviews
   and balanced across people.
 - **Repo** shows maintainer-facing health: queue size, who has what, next steps, categories,
   severity, reviewer load.
