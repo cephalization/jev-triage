@@ -276,8 +276,10 @@ async function runSync(
 
       if (capped) {
         finalPhase = "capped";
-        // Keep walking only while there may be fresh updates to stored issues ahead.
-        if (reachedKnown || !highWater) break walk;
+        // Keep walking only while there may be fresh updates to stored issues ahead: that is
+        // the recent phase before the high-water mark. Past it (the history phase) every
+        // issue is older than the last sync, so a full cap means nothing more can be stored.
+        if (reachedKnown || !highWater || phase === "history") break walk;
       }
       if (reachedKnown && historyDone) break walk;
       // Recent issues are in; fetch pull requests before the slow backfill.
