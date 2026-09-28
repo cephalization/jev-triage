@@ -3,10 +3,12 @@ import { effectiveIssue, mutators, numeric, PULL_KINDS, queries } from "@triage/
 import { REVIEW_EFFORT_LEVELS } from "@triage/triage/types";
 import type { Assignment } from "@triage/triage/reviewers";
 import { ExternalLink, X } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { buildAgentPrompt, type HandoffStep } from "../lib/agent-prompt.ts";
 import { ago, EFFORT_NAMES, pct, REVIEW_DECISION_NAMES, severityColor } from "../lib/format.ts";
 import type { Session } from "../lib/auth.ts";
 import { Avatar } from "./Avatar.tsx";
+import { CopyAgentPrompt } from "./CopyAgentPrompt.tsx";
 import { GuidedReview } from "./GuidedReview.tsx";
 import { ProbStrip, ReviewDecisionMark, SectionLabel, StatusIcon, Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
@@ -57,6 +59,7 @@ export function PullPanel({
   hasReviewDefault,
   onClose,
   now,
+  handoffStep,
 }: {
   pullId: string;
   questionsVersion: number;
@@ -67,10 +70,12 @@ export function PullPanel({
   hasReviewDefault: boolean;
   onClose: () => void;
   now: number;
+  handoffStep?: HandoffStep;
 }) {
   const z = useZero();
   const [pull, result] = useQuery(queries.pulls.byId(pullId));
   const [note, setNote] = useState("");
+  useEffect(() => setNote(""), [pullId]);
   const eff = useMemo(
     () =>
       pull
@@ -246,6 +251,19 @@ export function PullPanel({
             value={note}
             onChange={(e) => setNote(e.target.value)}
             placeholder="Add a note to your next change…"
+          />
+          <CopyAgentPrompt
+            key={pull.id}
+            buildPrompt={() =>
+              buildAgentPrompt({
+                subject: pull,
+                questionsVersion,
+                actor: session.user.login,
+                userName: (id) => pull.feedback.find((f) => f.user_id === id)?.user?.name ?? id,
+                step: handoffStep,
+                draftNote: note,
+              })
+            }
           />
         </section>
 

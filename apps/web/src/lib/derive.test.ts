@@ -1,5 +1,7 @@
 import { DEFAULT_WEIGHTS } from "@triage/triage/priority";
 import { describe, expect, test } from "vite-plus/test";
+import { buildWorkQueue } from "./work-queue.ts";
+import { buildAgentPrompt } from "./agent-prompt.ts";
 import {
   activeUsers,
   calibrationPairs,
@@ -372,5 +374,243 @@ describe("whyLine", () => {
     );
     expect(whyLine({ ...empty, action: "accept", missing: "versions" })).toBe("");
     expect(whyLine({ ...empty, duplicateOf: "I_9" })).toBe("possible duplicate");
+  });
+});
+
+describe("personal work queue", () => {
+  const user = { userID: "u", login: "cephalization" };
+  const issueRows = (inputs: IssueInput[]) =>
+    deriveRows(inputs, 1, DEFAULT_WEIGHTS, undefined, 3000);
+  const pullRows = (inputs: PullInput[]) => derivePulls(inputs, 1, [], undefined, 3000);
+
+  test("urgent work outranks personal requests, which outrank community work", () => {
+    const queue = buildWorkQueue(
+      issueRows([
+        base(1, { classifications: [cls("severity", "0.85")] }),
+        base(2, { classifications: [cls("severity", "0.849"), cls("urgency", "0.749")] }),
+        base(3, { classifications: [cls("urgency", "0.75")] }),
+      ]),
+      pullRows([
+        pullBase(1, { requested_reviewers_json: ["Cephalization"] }),
+        pullBase(2, { review_decision: "APPROVED" }),
+      ]),
+      user,
+      [],
+      3000,
+    );
+    expect(queue.map((i) => i.key)).toEqual([
+      "issue:I_1",
+      "issue:I_3",
+      "pull:PR_1",
+      "pull:PR_2",
+      "issue:I_2",
+    ]);
+    expect(queue[2]!.reason).toBe("Your review was requested on GitHub");
+  });
+
+  test("respects claims and confident waiting, but uncertain waiting still needs triage", () => {
+    const queue = buildWorkQueue(
+      issueRows([
+        base(1, { triage: { status: "open", claimed_by: "other" } }),
+        base(2, { triage: { status: "done" } }),
+        base(3, { classifications: [cls("action", "wait")] }),
+        base(4, { classifications: [cls("action", "wait", 0.44)] }),
+        base(5, { state: "closed" }),
+        base(6, { triage: { status: "open", claimed_by: "u" } }),
+        base(7, {
+          classifications: [cls("action", "investigate")],
+          feedback: [{ id: "f", user_id: "u", kind: "action", value: "wait", created_at: 10 }],
+        }),
+      ]),
+      [],
+      user,
+      [],
+      3000,
+    );
+    expect(queue.map((i) => i.id)).toEqual(["I_6", "I_4"]);
+    expect(queue[1]!.action).toBe("Triage the issue");
+  });
+
+  test("never asks authors to review themselves, and distinguishes own work from waiting", () => {
+    const queue = buildWorkQueue(
+      [],
+      pullRows([
+        pullBase(1, { author: "Cephalization" }),
+        pullBase(2, { draft: true }),
+        pullBase(3, { author: "cephalization", review_decision: "CHANGES_REQUESTED" }),
+        pullBase(4, { author: "cephalization", draft: true }),
+        pullBase(5, { review_decision: "CHANGES_REQUESTED" }),
+        pullBase(6, { review_decision: "APPROVED", mergeable: "UNKNOWN" }),
+        pullBase(7, { review_decision: "APPROVED", mergeable: "CONFLICTING" }),
+        pullBase(8, { state: "merged" }),
+      ]),
+      user,
+      [],
+      3000,
+    );
+    expect(new Map(queue.map((i) => [i.id, i.action]))).toEqual(
+      new Map([
+        ["PR_3", "Address review feedback"],
+        ["PR_4", "Finish your draft"],
+        ["PR_6", "Check merge readiness"],
+        ["PR_7", "Resolve merge conflicts"],
+      ]),
+    );
+  });
+
+  test("a fresh review request overrides an earlier review, but a completed review alone stays out", () => {
+    const reviews = [{ id: "rv", reviewer: "CEPHALIZATION", state: "APPROVED", submitted_at: 100 }];
+    const queue = buildWorkQueue(
+      [],
+      pullRows([
+        pullBase(1, { reviews }),
+        pullBase(2, { reviews, requested_reviewers_json: ["cephalization"] }),
+        pullBase(3, {
+          feedback: [
+            { id: "f", user_id: "u", kind: "reviewer", value: "someone-else", created_at: 100 },
+          ],
+        }),
+      ]),
+      user,
+      [],
+      3000,
+    );
+    expect(queue.map((i) => i.id)).toEqual(["PR_2"]);
+  });
+
+  test("handled work returns only on a newer update; snoozes expire at their exact boundary", () => {
+    const rows = issueRows([base(1), base(2), base(3), base(4)]);
+    const states = [
+      { subject_kind: "issue", subject_id: "I_1", status: "handled", subject_updated_at: 2000 },
+      { subject_kind: "issue", subject_id: "I_2", status: "handled", subject_updated_at: 1999 },
+      {
+        subject_kind: "issue",
+        subject_id: "I_3",
+        status: "snoozed",
+        subject_updated_at: 1000,
+        snoozed_until: 3000,
+      },
+      {
+        subject_kind: "issue",
+        subject_id: "I_4",
+        status: "snoozed",
+        subject_updated_at: 1000,
+        snoozed_until: 3001,
+      },
+      { subject_kind: "pull", subject_id: "I_2", status: "handled", subject_updated_at: 9000 },
+    ];
+    expect(buildWorkQueue(rows, [], user, states, 3000).map((i) => [i.id, i.status])).toEqual([
+      ["I_1", "handled"],
+      ["I_2", "ready"],
+      ["I_3", "ready"],
+      ["I_4", "snoozed"],
+    ]);
+  });
+});
+
+describe("agent handoff", () => {
+  test("exports local human decisions and notes but fetches GitHub details instead of duplicating them", () => {
+    const subject = base(17, {
+      repo_id: "owner/repo",
+      url: "https://github.com/owner/repo/issues/17",
+      body: "BODY_SHOULD_BE_FETCHED",
+      classifications: [cls("action", "close")],
+      feedback: [
+        {
+          id: "f",
+          kind: "action",
+          value: "investigate",
+          user_id: "u",
+          created_at: 10,
+          note: "Regression since v2",
+        },
+      ],
+      triage: { status: "open", claimed_by: "u" },
+    });
+    const prompt = buildAgentPrompt({
+      subject,
+      questionsVersion: 1,
+      actor: "cephalization",
+      userName: () => "Alice",
+      draftNote: " Check offline saves ",
+      step: { action: "Investigate the issue", reason: "You claimed this" },
+      now: 1000,
+    });
+    expect(prompt).toContain("gh issue view 17 --repo 'owner/repo' --comments");
+    expect(prompt).toContain("https://github.com/owner/repo/issues/17");
+    expect(prompt).toContain("Investigate and reproduce");
+    expect(prompt).toContain("Why this is in my work queue: You claimed this");
+    expect(prompt).toContain("My unsaved triage note (context, not posted)\nCheck offline saves");
+    expect(prompt).not.toContain("BODY_SHOULD_BE_FETCHED");
+    const context = JSON.parse(prompt.split("## Triage context (JSON)\n")[1]!);
+    expect(context.triage.action).toEqual({
+      value: "investigate",
+      source: "human",
+      confidence: null,
+      supersededModelValue: "close",
+    });
+    expect(context.feedback[0]).toMatchObject({ by: "Alice", note: "Regression since v2" });
+    expect(context.claimedBy).toBe("Alice");
+  });
+
+  test("PR handoff includes the latest completed app review, marks stale heads, and omits GitHub payloads", () => {
+    const subject = {
+      ...pullBase(38, {
+        repo_id: "owner/repo",
+        files_json: ["REMOTE_FILE_LIST"],
+        body: "REMOTE_BODY",
+      }),
+      head_sha: "new-head",
+      guidedReviews: [
+        {
+          status: "ready",
+          head_sha: "older",
+          created_at: 1,
+          groups_json: [{ name: "Old", summary: "Old walkthrough", files: [] }],
+        },
+        {
+          status: "ready",
+          head_sha: "old-head",
+          created_at: 2,
+          groups_json: [
+            {
+              name: "Retry",
+              summary: "Check retry handling",
+              files: ["src/retry.ts"],
+              annotations: [
+                {
+                  path: "src/retry.ts",
+                  line: 17,
+                  side: "new" as const,
+                  kind: "bug" as const,
+                  text: "Timer may leak",
+                },
+              ],
+            },
+          ],
+        },
+        { status: "running", head_sha: "new-head", created_at: 3, groups_json: [] },
+      ],
+    };
+    const prompt = buildAgentPrompt({ subject, questionsVersion: 1, actor: "me", now: 1000 });
+    expect(prompt).toContain("https://github.com/owner/repo/pull/38");
+    expect(prompt).toContain("gh pr diff 38 --repo 'owner/repo'");
+    expect(prompt).toContain("STALE: different head");
+    expect(prompt).toContain("Timer may leak");
+    expect(prompt).not.toContain("Old walkthrough");
+    expect(prompt).not.toContain("REMOTE_BODY");
+    expect(prompt).not.toContain("REMOTE_FILE_LIST");
+    expect(prompt).toContain("without my explicit approval");
+  });
+
+  test("ignores retired classifications and does not serialize unrelated attached properties", () => {
+    const subject = {
+      ...base(3, { classifications: [cls("action", "close")] }),
+      sessionToken: "DO_NOT_EXPORT",
+    };
+    const prompt = buildAgentPrompt({ subject, questionsVersion: 2, actor: "me", now: 1000 });
+    expect(prompt).toContain("Triage this issue");
+    expect(prompt).not.toContain("Verify whether closure is justified");
+    expect(prompt).not.toContain("DO_NOT_EXPORT");
   });
 });

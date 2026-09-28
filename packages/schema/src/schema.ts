@@ -417,6 +417,19 @@ const presence = table("presence")
   })
   .primaryKey("client_id");
 
+const workQueueState = table("work_queue_state")
+  .columns({
+    user_id: string(),
+    repo_id: string(),
+    subject_kind: string(),
+    subject_id: string(),
+    status: string(),
+    subject_updated_at: number(),
+    snoozed_until: number().optional(),
+    updated_at: number(),
+  })
+  .primaryKey("user_id", "subject_kind", "subject_id");
+
 const workerState = table("worker_state")
   .columns({
     repo_id: string(),
@@ -530,6 +543,7 @@ export const schema = createSchema({
     feedback,
     presence,
     workerState,
+    workQueueState,
   ],
   relationships: [
     repoRelationships,

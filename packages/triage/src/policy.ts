@@ -21,3 +21,6 @@ export const THRESHOLDS: Thresholds = {
   actionAuto: 0.45,
   reviewerAuto: 0.45,
 };
+
+/** Urgent issues interrupt ordinary personal work in the combined maintainer queue. */
+export const WORK_QUEUE_THRESHOLDS = { severity: 0.85, urgency: 0.75 } as const;

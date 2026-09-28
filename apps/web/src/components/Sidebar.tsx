@@ -50,6 +50,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 import { VIEW_PATH, type View } from "../router.tsx";
 
 const NAV: { id: View; label: string; icon: typeof Inbox; key: string }[] = [
+  { id: "work", label: "Work queue", icon: Inbox, key: "g w" },
   { id: "triage", label: "Triage", icon: Inbox, key: "g t" },
   { id: "unsure", label: "Unsure", icon: CircleHelp, key: "g u" },
   { id: "pulls", label: "Pull requests", icon: GitPullRequest, key: "g p" },

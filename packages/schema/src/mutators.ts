@@ -108,6 +108,15 @@ export const reviewMarkStepArgs = z.object({
   reviewed: z.boolean(),
 });
 
+export const workQueueSetArgs = z.object({
+  repoId: z.string(),
+  subjectKind: z.enum(["issue", "pull"]),
+  subjectId: z.string(),
+  // Use the version the person saw, not a possibly newer server-side update.
+  subjectUpdatedAt: z.number().finite(),
+  status: z.enum(["handled", "snoozed", "ready"]),
+});
+
 export const triageClaimArgs = z.object({
   issueId: z.string(),
   repoId: z.string(),
@@ -154,6 +163,35 @@ async function patchTriage(tx: Transaction, issueId: string, repoId: string, pat
 }
 
 export const mutators = defineMutators({
+  workQueue: {
+    set: defineMutator(workQueueSetArgs, async ({ tx, ctx, args }) => {
+      if (!ctx) throw new Error("Sign in to manage your work queue");
+      const subject =
+        args.subjectKind === "issue"
+          ? await tx.run(zql.issue.where("id", args.subjectId).one())
+          : await tx.run(zql.pull.where("id", args.subjectId).one());
+      if (!subject || subject.repo_id !== args.repoId)
+        throw new Error("Work item does not belong to this repository");
+      const key = {
+        user_id: ctx.userID,
+        subject_kind: args.subjectKind,
+        subject_id: args.subjectId,
+      };
+      if (args.status === "ready") {
+        await tx.mutate.work_queue_state.delete(key);
+        return;
+      }
+      const now = Date.now();
+      await tx.mutate.work_queue_state.upsert({
+        ...key,
+        repo_id: args.repoId,
+        status: args.status,
+        subject_updated_at: Math.min(args.subjectUpdatedAt, subject.updated_at),
+        snoozed_until: args.status === "snoozed" ? now + 86_400_000 : null,
+        updated_at: now,
+      });
+    }),
+  },
   feedback: {
     set: defineMutator(feedbackSetArgs, async ({ tx, ctx, args }) => {
       if (!ctx) throw new Error("Sign in to leave feedback");

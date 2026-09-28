@@ -23,6 +23,34 @@ export const pullFilterArgs = z.object({
 });
 
 export const queries = defineQueries({
+  workQueue: {
+    // Unlike the browse lists, this must include old work beyond the newest 500 rows.
+    byRepo: defineQuery(z.string(), ({ args: repoId }) =>
+      zql.repo
+        .where("id", repoId)
+        .one()
+        .related("issues", (q) =>
+          q
+            .where("state", "open")
+            .related("classifications")
+            .related("feedback")
+            .related("labels")
+            .related("presence")
+            .related("triage"),
+        )
+        .related("pulls", (q) =>
+          q
+            .where("state", "open")
+            .related("classifications")
+            .related("feedback")
+            .related("reviews"),
+        )
+        .related("reviewers"),
+    ),
+    state: defineQuery(z.string(), ({ args: repoId, ctx }) =>
+      zql.work_queue_state.where("repo_id", repoId).where("user_id", ctx?.userID ?? ""),
+    ),
+  },
   users: {
     all: defineQuery(() => zql.user.orderBy("name", "asc")),
   },

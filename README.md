@@ -12,6 +12,13 @@ Nothing is written back to GitHub. The app is a shared view over a repository, n
 
 ## What you see
 
+- **Work queue** is the default view: a personal, combined issue and PR queue for the selected
+  repository. Urgent issues come first, then your claims and requested reviews, then suggested
+  reviews and other maintainer work. Each item explains the next step. **Handled** and **Snooze
+  1 day** affect only your queue and sync across tabs; handled work returns after a newer GitHub
+  update, and either action can be undone from its tab. `j`/`k` and Next walk the queue.
+  Recommendations use existing classifications and GitHub metadata, not a second model pass.
+  Replies, approvals and merges still happen on GitHub; “handled” does not perform them.
 - **Triage** groups open issues by the suggested next step: ask the author, reply with an
   answer, investigate, needs a decision, accept into the backlog, close, or waiting. Marking an
   issue done clears it from the queue. Claiming it shows who is on it.
@@ -27,7 +34,12 @@ Nothing is written back to GitHub. The app is a shared view over a repository, n
 
 Keyboard: `j`/`k` or arrows move, `Esc` closes the panel, `a` accepts the suggestion and marks
 the issue done, `c` claims, `x` toggles done, `1`–`6` set the category, `/` searches,
-`g` then `t`/`u`/`p`/`r`/`s` switches views.
+`g` then `w`/`t`/`u`/`p`/`r`/`s` switches views.
+
+**Copy agent prompt** in an issue or PR's Triage section hands work to Claude Code or Codex.
+It includes the GitHub link, task, app-only decisions and notes (including your unsaved note),
+and any generated review guidance. The agent fetches live details from GitHub. Copying does not
+claim, complete, or change the item; clipboard failures offer a manually selectable prompt.
 
 ## Requirements
 
