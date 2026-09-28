@@ -34,3 +34,6 @@ dist-ssr
 
 # celld dev state
 .celld/
+
+# Amp orb portal state
+.amp/portals/

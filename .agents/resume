@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runtime services are supervised through .amp/services.yaml; no repair work is required.
