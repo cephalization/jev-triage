@@ -134,6 +134,18 @@ Feedback is append-only and keyed by a client-generated id, so concurrent edits 
 the newest row wins for display and every row stays in the history. Repo knobs are
 last-writer-wins through Zero's rebase.
 
+### Personal work queue
+
+The default `/work` view combines all open issues and pulls in the selected repo (without the
+browse lists' 500-row limit). It ranks urgent issues, personal claims/requests, suggested reviews
+and merge-readiness checks, then community work; existing priority breaks ties within a tier.
+`work_queue_state` is keyed by authenticated user, subject kind and subject id. Its query returns
+only that user's rows and its mutator validates repository membership. Handled items retain the
+GitHub timestamp the person saw, so a later sync update brings them back even if it races the
+mutation. Snoozes last 24 hours, including through updates. Neither changes team triage status.
+No additional Jev questions or GitHub writes occur. A future conversation-aware pass needs synced
+comments/review threads before it can reliably decide whose turn it is.
+
 ### Recalculate
 
 "Re-ask" flags the issues in view. "Recalculate everything" bumps `questions_version` so every

@@ -11,6 +11,7 @@ import { SEVERITY_LEVELS, URGENCY_LEVELS } from "@triage/triage/types";
 import { cn } from "cn";
 import { Check, CircleCheck, ExternalLink, Hand, RotateCcw, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { buildAgentPrompt, type HandoffStep } from "../lib/agent-prompt.ts";
 import { whyLine } from "../lib/derive.ts";
 import {
   ACTION_META,
@@ -25,6 +26,7 @@ import {
 } from "../lib/format.ts";
 import { viewersOf } from "../lib/presence.ts";
 import { Avatar } from "./Avatar.tsx";
+import { CopyAgentPrompt } from "./CopyAgentPrompt.tsx";
 import type { UserInfo } from "./IssueTable.tsx";
 import { ActionPill, CategoryChip, ProbStrip, SectionLabel, StatusIcon, Tag } from "./Marks.tsx";
 import { Button } from "./ui/button.tsx";
@@ -94,6 +96,7 @@ export function IssuePanel({
   onClose,
   onAdvance,
   now,
+  handoffStep,
 }: {
   issueId: string;
   questionsVersion: number;
@@ -106,11 +109,13 @@ export function IssuePanel({
   /** Called after the issue leaves the queue so the selection can move on. */
   onAdvance: () => void;
   now: number;
+  handoffStep?: HandoffStep;
 }) {
   const z = useZero();
   const [issue, result] = useQuery(queries.issues.byId(issueId));
   const [note, setNote] = useState("");
   const [dupNumber, setDupNumber] = useState("");
+  useEffect(() => setNote(""), [issueId]);
   const eff = useMemo(
     () =>
       issue
@@ -580,6 +585,19 @@ export function IssuePanel({
               </span>
             </div>
           )}
+          <CopyAgentPrompt
+            key={issue.id}
+            buildPrompt={() =>
+              buildAgentPrompt({
+                subject: issue,
+                questionsVersion,
+                actor: users.get(selfId)?.name ?? selfId,
+                userName: (id) => users.get(id)?.name ?? id,
+                step: handoffStep,
+                draftNote: note,
+              })
+            }
+          />
         </section>
 
         <section className="px-4 py-3">

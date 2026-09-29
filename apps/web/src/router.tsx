@@ -17,6 +17,7 @@ import {
   triageSearch,
   UNSURE_DEFAULTS,
   unsureSearch,
+  workSearch,
 } from "./lib/search.ts";
 import { PullsView } from "./views/PullsView.tsx";
 import { RepoView } from "./views/RepoView.tsx";
@@ -25,6 +26,7 @@ import { Shell } from "./views/Shell.tsx";
 import { SystemView } from "./views/SystemView.tsx";
 import { TriageView } from "./views/TriageView.tsx";
 import { UnsureView } from "./views/UnsureView.tsx";
+import { WorkQueueView } from "./views/WorkQueueView.tsx";
 
 /**
  * `/{view}/{id}?repo=owner/name&…filters`. The repository rides along on every route; each
@@ -48,8 +50,16 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   beforeLoad: ({ search }) => {
-    throw redirect({ to: "/triage", search: { repo: search.repo } });
+    throw redirect({ to: "/work", search: { repo: search.repo } });
   },
+});
+
+export const workRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "work",
+  validateSearch: workSearch,
+  search: { middlewares: [stripSearchParams({ bucket: "ready" })] },
+  component: WorkQueueView,
 });
 
 export const triageRoute = createRoute({
@@ -99,8 +109,9 @@ export const systemRoute = createRoute({
   component: SystemView,
 });
 
-export type View = "triage" | "unsure" | "pulls" | "repo" | "system";
+export type View = "work" | "triage" | "unsure" | "pulls" | "repo" | "system";
 export const VIEW_PATH = {
+  work: "/work",
   triage: "/triage",
   unsure: "/unsure",
   pulls: "/pulls",
@@ -110,6 +121,7 @@ export const VIEW_PATH = {
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  workRoute,
   triageRoute.addChildren([triageIssueRoute]),
   unsureRoute.addChildren([unsureIssueRoute]),
   pullsRoute.addChildren([pullRoute]),

@@ -26,6 +26,11 @@ export const PULL_SORT_KEYS = [
 /** Carried by every route: which repository the app is looking at. */
 export const rootSearch = z.object({ repo: z.string().optional() });
 
+export const workSearch = z.object({
+  bucket: z.enum(["ready", "snoozed", "handled"]).default("ready"),
+  item: z.string().optional(),
+});
+
 export const triageSearch = z.object({
   state: z.enum(["open", "closed", "all"]).default("open"),
   cat: z.string().default("all"),

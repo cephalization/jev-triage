@@ -11,7 +11,14 @@ import { useTheme } from "../lib/theme.ts";
 import { rootRoute, type View, VIEW_PATH } from "../router.tsx";
 import { ShellContext } from "./shell-context.ts";
 
-const GO: Record<string, View> = { t: "triage", u: "unsure", p: "pulls", r: "repo", s: "system" };
+const GO: Record<string, View> = {
+  w: "work",
+  t: "triage",
+  u: "unsure",
+  p: "pulls",
+  r: "repo",
+  s: "system",
+};
 
 /**
  * The frame around every view: sidebar (with live counts), the mobile navigation sheet, the
@@ -132,7 +139,9 @@ export function Shell() {
 /** The issue open in the split panel, if the current URL names one. */
 function useOpenIssueId(): string | null {
   const path = useRouterPath();
+  const item = useLocation({ select: (l) => l.search.item });
   const [, view, id] = path.split("/");
+  if (view === "work" && item?.startsWith("issue:")) return item.slice(6);
   return (view === "triage" || view === "unsure") && id ? decodeURIComponent(id) : null;
 }
 
